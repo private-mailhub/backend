@@ -50,7 +50,7 @@ pnpm-debug.log*
 lerna-debug.log*
 logs/
 # Application source module, not a runtime log directory
-!back-end/src/logs/
+!src/logs/
 
 # Temporary files
 *.tmp
@@ -71,3 +71,8 @@ coverage/
 
 # AWS
 *.pem
+
+# Environment and personal settings
+.env*
+!.env.example
+**/.claude/settings.local.json
