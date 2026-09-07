@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="front-end/public/logo.png" alt="Mailhub logo" width="120" />
+  <img src="docs/main.png" alt="Mailhub logo" width="120" />
 </p>
 
 <h1 align="center">Mailhub</h1>
@@ -10,13 +10,13 @@
 
 <p align="center">
   <a href="https://private-mailhub.com">Try Mailhub</a> ·
-  <a href="https://github.com/youngjinmo/mailhub/releases">Releases</a> ·
-  <a href="https://github.com/youngjinmo/mailhub/issues">Issues</a>
+  <a href="https://github.com/private-mailhub/mailhub/releases">Releases</a> ·
+  <a href="https://github.com/private-mailhub/mailhub/issues">Issues</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/v/release/youngjinmo/mailhub" alt="Latest release" />
-  <img src="https://img.shields.io/badge/Node.js-%3E%3D20-brightgreen.svg" alt="Node.js >= 20" />
+  <img src="https://img.shields.io/github/v/release/private-mailhub/mailhub" alt="Latest release" />
+  <img src="https://img.shields.io/badge/Node.js-24.14.1-brightgreen.svg" alt="Node.js 24.14.1" />
   <img src="https://img.shields.io/badge/NestJS-11.x-ea2845.svg" alt="NestJS 11" />
   <img src="https://img.shields.io/badge/React-18-61dafb.svg" alt="React 18" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="AGPL-3.0 license" /></a>
@@ -55,7 +55,7 @@ it starts receiving unwanted mail.
 ## Screenshots
 
 <p align="center">
-  <img src="front-end/public/landing-main.png" alt="Mailhub relay address dashboard" width="800" />
+  <img src="docs/main.png" alt="Mailhub relay address dashboard" width="800" />
 </p>
 
 ## How it works
@@ -114,8 +114,9 @@ flowchart LR
 
 ## Self-hosting
 
-The repository contains two independent Node.js applications. There is no root `package.json`, so
-install and run dependencies from `back-end` and `front-end` separately.
+This repository contains the NestJS API and SQS worker at its root. The React application lives in
+[mailhub-frontend](https://github.com/private-mailhub/mailhub-frontend). Each repository installs,
+checks, builds, and deploys independently.
 
 This repository does not provision AWS or DNS resources. Before running a worker, configure a SES
 receipt rule that stores mail in S3, an S3 event notification to SQS, IAM permissions for the worker,
@@ -124,7 +125,7 @@ access policies in AWS; the application only reads the resulting SQS event and S
 
 ### Prerequisites
 
-- Node.js 20 or newer and npm
+- Node.js 24.14.1 and its bundled npm for local/CI validation; verify the EC2 runtime before cutover
 - MySQL 8+ or another MySQL-compatible database
 - Redis 7+
 - AWS account with SES, S3, and SQS configured for the relay domain
@@ -138,11 +139,11 @@ Apple sign-in control.
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/youngjinmo/mailhub.git
+git clone https://github.com/private-mailhub/mailhub.git
 cd mailhub
 
-npm --prefix back-end ci
-npm --prefix front-end ci
+npm ci
+
 ```
 
 ### 2. Configure the environment
@@ -150,18 +151,18 @@ npm --prefix front-end ci
 Copy the checked-in examples and replace every placeholder before starting the backend:
 
 ```bash
-cp back-end/.env.example back-end/.env
-cp front-end/.env.example front-end/.env
+cp .env.example .env
 ```
 
-Generate a 32-byte Base64 value for `ENCRYPTION_KEY`:
+For a **new installation only**, generate a 32-byte Base64 value for `ENCRYPTION_KEY`.
+During repository separation, retain the existing key and data:
 
 ```bash
 openssl rand -base64 32
 ```
 
-The current browser client requires the same value in `back-end/.env` as `ENCRYPTION_KEY` and in
-`front-end/.env` as `VITE_ENCRYPTION_KEY`. Vite exposes `VITE_*` values in the browser bundle, so
+The current browser client requires the same value in `.env` as `ENCRYPTION_KEY` and in
+the frontend repository’s `.env` as `VITE_ENCRYPTION_KEY`. Vite exposes `VITE_*` values in the browser bundle, so
 this value is an implementation compatibility value, not a server-only secret. Never put a JWT,
 AWS, Mailgun, OAuth, or other server secret in a `VITE_*` variable. Keep server-only values in a
 secrets manager and never commit `.env` files.
@@ -170,19 +171,19 @@ The most important settings are:
 
 | File | Variable | Example or note |
 | --- | --- | --- |
-| `back-end/.env` | `APP_NAME`, `APP_DOMAIN`, `PORT`, `CORS_ORIGINS` | Application identity, relay domain, listener, and allowed browser origins. |
-| `back-end/.env` | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` | Database connection. |
-| `back-end/.env` | `REDIS_HOST`, `REDIS_PORT`, `REDIS_TTL` | Redis connection and cache lifetime. |
-| `back-end/.env` | `JWT_SECRET`, `ENCRYPTION_KEY` | Server configuration; `ENCRYPTION_KEY` must decode to 32 bytes. |
-| `back-end/.env` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_S3_EMAIL_BUCKET`, `AWS_SQS_QUEUE_NAME`, `AWS_SQS_QUEUE_URL` | AWS SDK configuration used by the mail path and worker. |
-| `back-end/.env` | `NO_REPLY_ADDRESS`, `CONTACT_ADDRESS` | Service and support addresses. |
-| `back-end/.env` | `MAILGUN_API_KEY`, `MAILGUN_BASE_URL` | Valid Mailgun settings are required to send production mail. |
-| `back-end/.env` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional; required only for the corresponding web OAuth flow. |
-| `back-end/.env` | `APPLE_CLIENT_ID` | Used by the backend Apple OAuth endpoint; the current web UI does not expose that flow. |
-| `front-end/.env` | `VITE_API_URL` | Local default: `http://localhost:8080`. Do not append `/api`. |
-| `front-end/.env` | `VITE_ENCRYPTION_KEY` | Must match the backend value, but is visible to browser users. |
+| `.env` | `APP_NAME`, `APP_DOMAIN`, `PORT`, `CORS_ORIGINS` | Application identity, relay domain, listener, and allowed browser origins. |
+| `.env` | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` | Database connection. |
+| `.env` | `REDIS_HOST`, `REDIS_PORT`, `REDIS_TTL` | Redis connection and cache lifetime. |
+| `.env` | `JWT_SECRET`, `ENCRYPTION_KEY` | Server configuration; `ENCRYPTION_KEY` must decode to 32 bytes. |
+| `.env` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_S3_EMAIL_BUCKET`, `AWS_SQS_QUEUE_NAME`, `AWS_SQS_QUEUE_URL` | AWS SDK configuration used by the mail path and worker. |
+| `.env` | `NO_REPLY_ADDRESS`, `CONTACT_ADDRESS` | Service and support addresses. |
+| `.env` | `MAILGUN_API_KEY`, `MAILGUN_BASE_URL` | Valid Mailgun settings are required to send production mail. |
+| `.env` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional; required only for the corresponding web OAuth flow. |
+| `.env` | `APPLE_CLIENT_ID` | Used by the backend Apple OAuth endpoint; the current web UI does not expose that flow. |
+| the frontend repository’s `.env` | `VITE_API_URL` | Local default: `http://localhost:8080`. Do not append `/api`. |
+| the frontend repository’s `.env` | `VITE_ENCRYPTION_KEY` | Must match the backend value, but is visible to browser users. |
 
-The backend validates its core startup configuration. See the two `.env.example` files for the
+The backend validates its core startup configuration. See each repository’s `.env.example` file for the
 complete list; optional OAuth settings are read only when their corresponding flow is used.
 
 ### 3. Initialize the database
@@ -194,30 +195,24 @@ index names, so it is not a safe replacement for the bootstrap script.
 
 Use a schema baseline that you have validated against this revision before starting a new deployment.
 For an existing installation, back up the database and validate the target schema in a disposable
-environment before running `npm --prefix back-end run migration:run`.
+environment before running `npm run migration:run`.
 
 ### 4. Start the applications
 
-Start the backend and frontend in separate terminals:
+Start the API from this repository root:
 
 ```bash
-# Terminal 1: API server
-npm --prefix back-end run start:dev
+npm run start:dev
 ```
 
-```bash
-# Terminal 2: Vite development server
-npm --prefix front-end run start
-```
-
-Open [http://localhost:3000](http://localhost:3000). The API is available at
-[http://localhost:8080/api](http://localhost:8080/api).
+The API is available at [http://localhost:8080/api](http://localhost:8080/api).
+Follow the [frontend README](https://github.com/private-mailhub/mailhub-frontend#readme) to start the UI.
 
 To run the SQS worker locally, start a second backend process with worker mode enabled. It requires
 the AWS S3/SQS resources to be configured:
 
 ```bash
-WORKER_MODE=true npm --prefix back-end run start:dev
+WORKER_MODE=true npm run start:dev
 ```
 
 ## Useful commands
@@ -226,45 +221,24 @@ WORKER_MODE=true npm --prefix back-end run start:dev
 
 | Command | Purpose |
 | --- | --- |
-| `npm --prefix back-end run start:dev` | Start the API in watch mode. |
-| `npm --prefix back-end run build` | Build the backend and run its formatting/lint steps. |
-| `npm --prefix back-end run test` | Run unit tests. |
-| `npm --prefix back-end run test:e2e` | Run end-to-end tests. |
-| `npm --prefix back-end run migration:run` | Apply pending TypeORM migrations. |
-| `npm --prefix back-end run migration:revert` | Revert the latest migration. |
+| `npm run start:dev` | Start the API in watch mode. |
+| `npm run build` | Build the backend without modifying source files. |
+| `npm run test` | Run unit tests. |
+| `npm run test:e2e` | Run end-to-end tests. |
+| `npm run migration:run` | Apply pending TypeORM migrations. |
+| `npm run migration:revert` | Revert the latest migration. |
 
-### Frontend
-
-| Command | Purpose |
-| --- | --- |
-| `npm --prefix front-end run start` | Start the Vite development server. |
-| `npm --prefix front-end run build:prod` | Create a production frontend build. |
-| `npm --prefix front-end run lint` | Check frontend lint rules. |
-| `npm --prefix front-end run preview` | Preview the production build locally. |
+Also run `npm run lint`, `npm run typecheck`, `npm test -- --runInBand`, and
+`npm run test:e2e -- --runInBand`. Formatting is an explicit, separate command.
 
 ## Production deployment
 
-The repository includes starting-point templates for [PM2](ecosystem.config.js) and
-[Nginx](nginx.config.mjs). They are not turnkey deployment automation. In particular, correct the
-uncommented `HTTPS server` text in the Nginx template before copying it, then run `nginx -t` on the
-target host. Before using either template:
+See [deployment and rollback](docs/deployment.md) and [split verification](docs/repository-split.md).
+The templates in `deploy/` use immutable release directories, a candidate API, and a separately
+selected worker. Production activation requires the documented runtime, environment, Nginx,
+process, and authenticated readiness checks. No database migration is part of this split.
 
-1. Update their absolute paths and domain names for your server.
-2. Provision MySQL, Redis, AWS SES/S3/SQS, Mailgun, DNS, and TLS.
-3. Build both applications:
-
-   ```bash
-   npm --prefix back-end run build
-   npm --prefix front-end run build:prod
-   ```
-
-4. Run one PM2 process with `WORKER_MODE=false` for the API and one with `WORKER_MODE=true` for the
-   SQS worker.
-5. Configure Nginx to serve `front-end/dist` and proxy `/api` to port `8080`, then validate the
-   rendered Nginx configuration before reloading it.
-
-Set `NODE_ENV=production` to use Mailgun for outbound email. In development and other non-production
-environments, the mail service uses Amazon SES instead.
+Set `NODE_ENV=production` to use Mailgun for outbound email. Other environments use Amazon SES.
 
 ## Security
 
