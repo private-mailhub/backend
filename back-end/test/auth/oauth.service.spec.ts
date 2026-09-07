@@ -85,59 +85,62 @@ describe('OAuthService', () => {
     fetchSpy
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ access_token: 'github-access-token' }),
+        json: () => Promise.resolve({ access_token: 'github-access-token' }),
       } as Response)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ id: 987654 }),
+        json: () => Promise.resolve({ id: 987654 }),
       } as Response)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => [{ primary: true, verified: true, email: 'person@example.com' }],
+        json: () =>
+          Promise.resolve([{ primary: true, verified: true, email: 'person@example.com' }]),
       } as Response);
 
     await service.linkWithGithub(1n, 'code', 'https://app.test/login/oauth/github/callback');
 
-    expect(usersService.linkOAuth).toHaveBeenCalledWith(
+    expect(usersService.linkOAuth.mock.calls[0]).toEqual([
       1n,
       OAuthProvider.GITHUB,
       '987654',
       'enc:github-access-token',
-    );
+    ]);
   });
 
   it('links a Google account to the current user', async () => {
     fetchSpy.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({
-        id_token: buildJwt({ sub: 'google-subject', email: 'person@example.com' }),
-        refresh_token: 'google-refresh-token',
-      }),
+      json: () =>
+        Promise.resolve({
+          id_token: buildJwt({ sub: 'google-subject', email: 'person@example.com' }),
+          refresh_token: 'google-refresh-token',
+        }),
     } as Response);
 
     await service.linkWithGoogle(2n, 'code', 'https://app.test/login/oauth/google/callback');
 
-    expect(usersService.linkOAuth).toHaveBeenCalledWith(
+    expect(usersService.linkOAuth.mock.calls[0]).toEqual([
       2n,
       OAuthProvider.GOOGLE,
       'google-subject',
       'enc:google-refresh-token',
-    );
+    ]);
   });
 
   it('surfaces a conflict when the OAuth identity already belongs to another user', async () => {
     fetchSpy
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ access_token: 'github-access-token' }),
+        json: () => Promise.resolve({ access_token: 'github-access-token' }),
       } as Response)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ id: 111222 }),
+        json: () => Promise.resolve({ id: 111222 }),
       } as Response)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => [{ primary: true, verified: true, email: 'person@example.com' }],
+        json: () =>
+          Promise.resolve([{ primary: true, verified: true, email: 'person@example.com' }]),
       } as Response);
 
     usersService.linkOAuth.mockRejectedValueOnce(
@@ -154,18 +157,20 @@ describe('OAuthService', () => {
     fetchSpy.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({}),
+      json: () => Promise.resolve({}),
     } as Response);
 
     await service.unlinkOAuth(4n, OAuthProvider.GITHUB);
 
-    expect(usersService.getOAuthToken).toHaveBeenCalledWith(4n, OAuthProvider.GITHUB);
-    expect(usersService.unlinkOAuth).toHaveBeenCalledWith(4n, OAuthProvider.GITHUB);
-    expect(fetchSpy).toHaveBeenCalledWith(
-      'https://api.github.com/applications/github-client-id/token',
-      expect.objectContaining({
-        method: 'DELETE',
-      }),
+    expect(usersService.getOAuthToken.mock.calls[0]).toEqual([4n, OAuthProvider.GITHUB]);
+    expect(usersService.unlinkOAuth.mock.calls[0]).toEqual([4n, OAuthProvider.GITHUB]);
+    expect(fetchSpy.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          'https://api.github.com/applications/github-client-id/token',
+          expect.objectContaining({ method: 'DELETE' }),
+        ],
+      ]),
     );
   });
 });

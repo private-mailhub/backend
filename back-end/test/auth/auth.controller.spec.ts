@@ -37,11 +37,11 @@ describe('AuthController', () => {
       ),
     ).resolves.toEqual({ message: 'GitHub OAuth linked successfully' });
 
-    expect(oauthService.linkWithGithub).toHaveBeenCalledWith(
+    expect(oauthService.linkWithGithub.mock.calls[0]).toEqual([
       7n,
       'code',
       'https://app.test/login/oauth/github/callback',
-    );
+    ]);
   });
 
   it('routes Google link callbacks through the current user', async () => {
@@ -52,11 +52,11 @@ describe('AuthController', () => {
       ),
     ).resolves.toEqual({ message: 'Google OAuth linked successfully' });
 
-    expect(oauthService.linkWithGoogle).toHaveBeenCalledWith(
+    expect(oauthService.linkWithGoogle.mock.calls[0]).toEqual([
       8n,
       'code',
       'https://app.test/login/oauth/google/callback',
-    );
+    ]);
   });
 
   it('keeps unlink behavior intact', async () => {
@@ -67,6 +67,6 @@ describe('AuthController', () => {
       ),
     ).resolves.toEqual({ message: 'github OAuth unlinked successfully' });
 
-    expect(oauthService.unlinkOAuth).toHaveBeenCalledWith(9n, OAuthProvider.GITHUB);
+    expect(oauthService.unlinkOAuth.mock.calls[0]).toEqual([9n, OAuthProvider.GITHUB]);
   });
 });
