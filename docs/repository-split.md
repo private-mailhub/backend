@@ -60,3 +60,18 @@ Keep new deployment activation disabled until the operations runbook gates are s
 - `.env.example` and `src/logs` remain trackable; real environment files and PEMs are ignored.
 - Source checks/builds did not modify tracked source files. Production dependencies retain lockfiles.
 - Real browser/account/mail checks and live Nginx/PM2/rollback checks remain pending as listed above.
+
+## Deployment validation and review
+
+- Both release harnesses passed locally, using real fcntl locking via a test-only shim where
+  util-linux flock is unavailable; Ubuntu CI uses its installed flock.
+- Covered immutable SHA releases, failed installation without publication, environment isolation
+  during install, public files, old/new hashed assets, collisions, umask 077, nested paths and
+  permissions readable by Nginx. Neither release script activates API/worker processes.
+- Production backend installation with --omit=dev --engine-strict --ignore-scripts succeeded
+  in a fresh isolated directory; all 22 runtime package imports passed without runtime environment.
+  The locked production lifecycle script is NestJS's optional donation prompt.
+- All four workflows passed actionlint 1.7.12. Shell syntax and git diff checks passed.
+- Code review and security re-review reported no remaining P1/P2 issues after corrections.
+- Live Nginx syntax validation, EC2 deployment, browser accounts, mail and rollback are still gated
+  on the unverified operational facts above; local tests do not substitute for those checks.

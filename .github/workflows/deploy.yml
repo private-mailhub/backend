@@ -1,71 +1,233 @@
-name: Deploy to EC2
-on:
-  push:
-    branches:
-      - production
-permissions:
-  id-token: write # required for authenticate AWS OIDC
-  contents: read  # required for read repository
-jobs:
-  deploy:
-    environment: production
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
+name: Prepare Backend Release
 
-      - name: Configure AWS credential
-        uses: aws-actions/configure-aws-credentials@main
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: backend-deploy-production
+  cancel-in-progress: false
+
+jobs:
+  prepare-backend-release:
+    if: ${{ vars.DEPLOYMENT_ENABLED == 'true' }}
+    environment:
+      name: production
+    runs-on: ubuntu-latest
+    env:
+      TARGET_SHA: ${{ github.sha }}
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+      EC2_USER: ${{ vars.EC2_USER || 'ubuntu' }}
+      EC2_SECURITY_GROUP: ${{ secrets.EC2_SECURITY_GROUP }}
+
+    steps:
+      - name: Checkout selected commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Use Node.js 24.14.1
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --engine-strict
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test -- --runInBand --no-cache --watchman=false
+
+      - name: E2E tests
+        run: npm run test:e2e -- --runInBand
+
+      - name: Build selected commit
+        run: npm run build
+
+      - name: Validate and package backend artifact
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]]
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          test -f dist/main.js
+          test -f package.json
+          test -f package-lock.json
+          test -f .nvmrc
+          test -f deploy/ecosystem.config.cjs
+
+          artifact_path="$RUNNER_TEMP/mailhub-backend-${TARGET_SHA}-${RUN_ID}.tar.gz"
+          tar -czf "$artifact_path" \
+            dist \
+            package.json \
+            package-lock.json \
+            deploy/ecosystem.config.cjs \
+            .nvmrc
+
+          artifact_listing="$RUNNER_TEMP/mailhub-backend-${TARGET_SHA}-${RUN_ID}.list"
+          tar -tzf "$artifact_path" > "$artifact_listing"
+          while IFS= read -r entry || [[ -n "$entry" ]]; do
+            case "$entry" in
+              dist|dist/*|deploy|deploy/|deploy/ecosystem.config.cjs|package.json|package-lock.json|.nvmrc)
+                ;;
+              *)
+                printf 'Unexpected artifact entry: %s\n' "$entry" >&2
+                exit 1
+                ;;
+            esac
+          done < "$artifact_listing"
+
+          printf 'BACKEND_ARTIFACT=%s\n' "$artifact_path" >> "$GITHUB_ENV"
+
+      - name: Validate deployment script
+        run: bash test/deploy-release.sh
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
-      - name: Get Github Action Runner IP
-        id: github-action-runner-ip
+      - name: Get runner IP
+        id: runner_ip
         run: |
-          echo "ip=$(curl -s https://checkip.amazonaws.com)" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          runner_ip="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')"
+          [[ "$runner_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+          printf 'ip=%s\n' "$runner_ip" >> "$GITHUB_OUTPUT"
 
-      - name: Add Github Action Runner IP to AWS Security Group
+      - name: Authorize temporary runner ingress
+        id: authorize_ingress
         run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ secrets.EC2_SECURITY_GROUP }} \
+          set -euo pipefail
+          [[ "$EC2_PORT" =~ ^[0-9]+$ ]]
+          (( EC2_PORT >= 1 && EC2_PORT <= 65535 ))
+          [[ -n "$EC2_SECURITY_GROUP" ]]
+          rule_id="$(aws ec2 authorize-security-group-ingress \
+            --group-id "$EC2_SECURITY_GROUP" \
             --protocol tcp \
-            --port 22 \
-            --cidr ${{ steps.github-action-runner-ip.outputs.ip }}/32
+            --port "$EC2_PORT" \
+            --cidr "${{ steps.runner_ip.outputs.ip }}/32" \
+            --query 'SecurityGroupRules[0].SecurityGroupRuleId' \
+            --output text)"
+          printf 'rule_id=%s\n' "$rule_id" >> "$GITHUB_OUTPUT"
+          [[ "$rule_id" =~ ^sgr-[0-9A-Za-z-]+$ ]]
 
-      - name: SSH and deploy to EC2
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          key: ${{ secrets.EC2_SSH_KEY }}
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          port: ${{ secrets.EC2_PORT }}
-          script: |
-            cd /var/www/private-mailhub
-
-            # Pull latest code
-            sudo git pull origin production
-
-            # Build front-end
-            cd front-end
-            sudo npm ci
-            sudo npm run build
-
-            # Build back-end
-            cd ../back-end
-            sudo npm ci
-            sudo npm run build
-
-            # Reload PM2 processes
-            cd ..
-            pm2 reload all
-
-      - name: Revoke IP from AWS Security  Group
-        if: always()
+      - name: Prepare pinned SSH host verification
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
+          [[ -n "$EC2_HOST" && -n "$EC2_SSH_KEY" && -n "$EC2_KNOWN_HOSTS" ]]
+          [[ "$EC2_PORT" =~ ^[0-9]+$ ]]
+          (( EC2_PORT >= 1 && EC2_PORT <= 65535 ))
+
+          ssh_dir="$RUNNER_TEMP/mailhub-ssh"
+          mkdir -p "$ssh_dir"
+          chmod 700 "$ssh_dir"
+          ssh_key_file="$ssh_dir/id_ed25519"
+          known_hosts_file="$ssh_dir/known_hosts"
+          umask 077
+          printf '%s\n' "$EC2_SSH_KEY" > "$ssh_key_file"
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$known_hosts_file"
+          chmod 600 "$ssh_key_file" "$known_hosts_file"
+
+          if ! ssh-keygen -F "$EC2_HOST" -f "$known_hosts_file" >/dev/null 2>&1 \
+            && ! ssh-keygen -F "[$EC2_HOST]:$EC2_PORT" -f "$known_hosts_file" >/dev/null 2>&1; then
+            printf 'EC2_KNOWN_HOSTS has no pinned key for the configured host and port\n' >&2
+            exit 1
+          fi
+
+          printf 'SSH_KEY_FILE=%s\n' "$ssh_key_file" >> "$GITHUB_ENV"
+          printf 'KNOWN_HOSTS_FILE=%s\n' "$known_hosts_file" >> "$GITHUB_ENV"
+
+      - name: Upload backend artifact
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          remote_artifact="/tmp/mailhub-backend-${TARGET_SHA}-${RUN_ID}.tar.gz"
+          printf 'REMOTE_ARTIFACT=%s\n' "$remote_artifact" >> "$GITHUB_ENV"
+          scp \
+            -q \
+            -i "$SSH_KEY_FILE" \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -P "$EC2_PORT" \
+            "$BACKEND_ARTIFACT" \
+            "$EC2_USER@$EC2_HOST:$remote_artifact"
+
+      - name: Prepare backend release (activation manual)
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$SSH_KEY_FILE" \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -p "$EC2_PORT" \
+            "$EC2_USER@$EC2_HOST" \
+            bash -s -- "$TARGET_SHA" "$REMOTE_ARTIFACT" < deploy/release.sh
+
+      - name: Verify prepared backend release
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$SSH_KEY_FILE" \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -p "$EC2_PORT" \
+            "$EC2_USER@$EC2_HOST" \
+            bash -s -- "$TARGET_SHA" <<'REMOTE_CHECK'
+          set -euo pipefail
+          release="/var/www/mailhub-backend/releases/$1"
+          test -f "$release/dist/main.js"
+          test -d "$release/node_modules"
+          test -L "$release/.env"
+          test "$(readlink "$release/.env")" = "/var/www/mailhub-backend/shared/.env"
+          REMOTE_CHECK
+
+      - name: Remove uploaded artifact
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${REMOTE_ARTIFACT:-}" && -n "${SSH_KEY_FILE:-}" && -n "${KNOWN_HOSTS_FILE:-}" ]]; then
+            ssh \
+              -i "$SSH_KEY_FILE" \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              -p "$EC2_PORT" \
+              "$EC2_USER@$EC2_HOST" \
+              rm -f -- "$REMOTE_ARTIFACT" || true
+          fi
+
+      - name: Revoke temporary runner ingress
+        if: ${{ always() && steps.authorize_ingress.outputs.rule_id != '' }}
+        run: |
+          set -euo pipefail
           aws ec2 revoke-security-group-ingress \
-            --group-id ${{ secrets.EC2_SECURITY_GROUP }} \
-            --protocol tcp \
-            --port 22 \
-            --cidr ${{ steps.github-action-runner-ip.outputs.ip }}/32
-
+            --group-id "$EC2_SECURITY_GROUP" \
+            --security-group-rule-ids "${{ steps.authorize_ingress.outputs.rule_id }}"
