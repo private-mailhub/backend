@@ -46,3 +46,6 @@ jobs:
 
       - name: Validate deployment script
         run: bash test/deploy-release.sh
+
+      - name: Validate SSH host verification
+        run: bash test/ssh-host-verification.sh

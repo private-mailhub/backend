@@ -96,6 +96,9 @@ jobs:
       - name: Validate deployment script
         run: bash test/deploy-release.sh
 
+      - name: Validate SSH host verification
+        run: bash test/ssh-host-verification.sh
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -115,6 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$EC2_PORT" =~ ^[0-9]+$ ]]
+          EC2_PORT=$((10#$EC2_PORT))
           (( EC2_PORT >= 1 && EC2_PORT <= 65535 ))
           [[ -n "$EC2_SECURITY_GROUP" ]]
           rule_id="$(aws ec2 authorize-security-group-ingress \
@@ -135,6 +139,7 @@ jobs:
           set -euo pipefail
           [[ -n "$EC2_HOST" && -n "$EC2_SSH_KEY" && -n "$EC2_KNOWN_HOSTS" ]]
           [[ "$EC2_PORT" =~ ^[0-9]+$ ]]
+          EC2_PORT=$((10#$EC2_PORT))
           (( EC2_PORT >= 1 && EC2_PORT <= 65535 ))
 
           ssh_dir="$RUNNER_TEMP/mailhub-ssh"
@@ -147,8 +152,12 @@ jobs:
           printf '%s\n' "$EC2_KNOWN_HOSTS" > "$known_hosts_file"
           chmod 600 "$ssh_key_file" "$known_hosts_file"
 
-          if ! ssh-keygen -F "$EC2_HOST" -f "$known_hosts_file" >/dev/null 2>&1 \
-            && ! ssh-keygen -F "[$EC2_HOST]:$EC2_PORT" -f "$known_hosts_file" >/dev/null 2>&1; then
+          lookup_host="$EC2_HOST"
+          if [[ "$EC2_PORT" != '22' ]]; then
+            lookup_host="[$EC2_HOST]:$EC2_PORT"
+          fi
+
+          if ! ssh-keygen -F "$lookup_host" -f "$known_hosts_file" >/dev/null 2>&1; then
             printf 'EC2_KNOWN_HOSTS has no pinned key for the configured host and port\n' >&2
             exit 1
           fi

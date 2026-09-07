@@ -25,6 +25,9 @@ This PR prepares deployment; it does not claim a completed production migration.
    known-hosts pin, security group, and AWS role. Scope frontend OIDC trust to its own repository
    and production environment. Do not duplicate backend runtime secrets into frontend Actions.
    Match the temporary ingress port to the SSH port; verify least privilege with the IAM owner.
+   For backend `EC2_KNOWN_HOSTS`, pin `host` for port 22 and `[host]:port` for other ports,
+   using the exact `EC2_HOST` value and the canonical decimal port without leading zeros.
+   Hashed entries for the same endpoint are also supported.
 7. Supply FE `VITE_API_URL` and existing `VITE_ENCRYPTION_KEY`. Never widen Vite envPrefix.
 8. Validate mixed client/API versions in an isolated environment and the browser scenarios below.
 
