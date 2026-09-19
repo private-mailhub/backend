@@ -18,6 +18,10 @@ import { CacheService } from '../cache/cache.service';
 import { SendMailService } from '../mail/send-mail.service';
 import { UserActivityLogService } from '../logs/user-activity-log.service';
 import { UserActivityType } from '../common/enums/activity-type.enum';
+import {
+  selectUsernameChangeInput,
+  type UsernameChangeInput,
+} from 'src/common/utils/username-input.util';
 
 @Injectable()
 export class UsersService {
@@ -51,10 +55,9 @@ export class UsersService {
     return !!user;
   }
 
-  async createEmailUser(encryptedUsername: string): Promise<User> {
+  async createEmailUser(username: string): Promise<User> {
     try {
-      // Check if user already exists
-      const username = this.proectionUtil.decrypt(encryptedUsername);
+      const encryptedUsername = this.proectionUtil.encrypt(username);
       const usernameHash = this.proectionUtil.hash(username);
       const existingUser = await this.findByUsernameHash(usernameHash);
       if (existingUser) {
@@ -276,13 +279,14 @@ export class UsersService {
     return (user[tokenField] as string) || null;
   }
 
-  async requestUsernameChange(userId: bigint, encryptedNewUsername: string): Promise<void> {
+  async requestUsernameChange(userId: bigint, input: UsernameChangeInput | string): Promise<void> {
     const user = await this.findById(userId);
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
-    const newUsername = this.proectionUtil.decrypt(encryptedNewUsername);
+    const newUsername = this.resolveUsernameChangeInput(input);
+    const encryptedNewUsername = this.proectionUtil.encrypt(newUsername);
     const newUsernameHash = this.proectionUtil.hash(newUsername);
 
     // Check if new username is same as current
@@ -326,6 +330,7 @@ export class UsersService {
     }
 
     const newUsername = this.proectionUtil.decrypt(cachedData.encryptedNewUsername);
+    const encryptedNewUsername = this.proectionUtil.encrypt(newUsername);
     const newUsernameHash = this.proectionUtil.hash(newUsername);
 
     // Double check new username doesn't exist
@@ -336,7 +341,7 @@ export class UsersService {
     }
 
     // Update username
-    user.username = cachedData.encryptedNewUsername;
+    user.username = encryptedNewUsername;
     user.usernameHash = newUsernameHash;
     await this.userRepository.save(user);
 
@@ -344,6 +349,19 @@ export class UsersService {
     await this.cacheService.deleteUsernameChangeData(userId);
 
     await this.userActivityLogService.record(userId, UserActivityType.USERNAME_CHANGE);
+  }
+
+  private resolveUsernameChangeInput(input: UsernameChangeInput | string): string {
+    if (typeof input === 'string') {
+      return input;
+    }
+
+    const selectedInput = selectUsernameChangeInput(input);
+    if (selectedInput.isEncrypted) {
+      return this.proectionUtil.decrypt(selectedInput.value);
+    }
+
+    return selectedInput.value;
   }
 
   private async ensureOAuthIdentity(

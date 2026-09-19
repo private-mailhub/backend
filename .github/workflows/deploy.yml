@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   prepare-backend-release:
-    if: ${{ vars.DEPLOYMENT_ENABLED == 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.DEPLOYMENT_ENABLED == 'true' }}
     environment:
       name: production
     runs-on: ubuntu-latest
@@ -30,6 +30,44 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
+
+      - name: Validate production deployment settings
+        env:
+          DEPLOYMENT_REF: ${{ github.ref }}
+          DEPLOYMENT_SHA: ${{ github.sha }}
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SECURITY_GROUP: ${{ secrets.EC2_SECURITY_GROUP }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          [[ "$DEPLOYMENT_REF" == 'refs/heads/main' ]]
+          [[ "$DEPLOYMENT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+
+          for required_value in \
+            "$AWS_ROLE_ARN" \
+            "$AWS_REGION" \
+            "$EC2_HOST" \
+            "$EC2_SECURITY_GROUP" \
+            "$EC2_SSH_KEY" \
+            "$EC2_KNOWN_HOSTS"; do
+            [[ -n "$required_value" ]]
+          done
+
+          [[ "$EC2_PORT" =~ ^[0-9]+$ ]]
+          port_number=$((10#$EC2_PORT))
+          if (( port_number < 1 )); then
+            printf 'EC2_PORT must be between 1 and 65535\n' >&2
+            exit 1
+          fi
+          if (( port_number > 65535 )); then
+            printf 'EC2_PORT must be between 1 and 65535\n' >&2
+            exit 1
+          fi
 
       - name: Use Node.js 24.14.1
         uses: actions/setup-node@v4
@@ -121,14 +159,30 @@ jobs:
           EC2_PORT=$((10#$EC2_PORT))
           (( EC2_PORT >= 1 && EC2_PORT <= 65535 ))
           [[ -n "$EC2_SECURITY_GROUP" ]]
-          rule_id="$(aws ec2 authorize-security-group-ingress \
-            --group-id "$EC2_SECURITY_GROUP" \
-            --protocol tcp \
-            --port "$EC2_PORT" \
-            --cidr "${{ steps.runner_ip.outputs.ip }}/32" \
-            --query 'SecurityGroupRules[0].SecurityGroupRuleId' \
+          runner_cidr="${{ steps.runner_ip.outputs.ip }}/32"
+          existing_rule="$(aws ec2 describe-security-group-rules \
+            --filters "Name=group-id,Values=$EC2_SECURITY_GROUP" \
+            --query "SecurityGroupRules[?IsEgress==\`false\` && IpProtocol==\`tcp\` && FromPort==\`$EC2_PORT\` && ToPort==\`$EC2_PORT\` && CidrIpv4==\`$runner_cidr\`].SecurityGroupRuleId | [0]" \
             --output text)"
+          if [[ "$existing_rule" == 'None' ]]; then
+            existing_rule=''
+          fi
+
+          ingress_added=false
+          rule_id="$existing_rule"
+          if [[ -z "$existing_rule" ]]; then
+            rule_id="$(aws ec2 authorize-security-group-ingress \
+              --group-id "$EC2_SECURITY_GROUP" \
+              --protocol tcp \
+              --port "$EC2_PORT" \
+              --cidr "$runner_cidr" \
+              --query 'SecurityGroupRules[0].SecurityGroupRuleId' \
+              --output text)"
+            ingress_added=true
+          fi
+
           printf 'rule_id=%s\n' "$rule_id" >> "$GITHUB_OUTPUT"
+          printf 'ingress_added=%s\n' "$ingress_added" >> "$GITHUB_OUTPUT"
           [[ "$rule_id" =~ ^sgr-[0-9A-Za-z-]+$ ]]
 
       - name: Prepare pinned SSH host verification
@@ -234,9 +288,11 @@ jobs:
           fi
 
       - name: Revoke temporary runner ingress
-        if: ${{ always() && steps.authorize_ingress.outputs.rule_id != '' }}
+        if: ${{ always() }}
         run: |
           set -euo pipefail
-          aws ec2 revoke-security-group-ingress \
-            --group-id "$EC2_SECURITY_GROUP" \
-            --security-group-rule-ids "${{ steps.authorize_ingress.outputs.rule_id }}"
+          if [[ "${{ steps.authorize_ingress.outputs.ingress_added }}" == 'true' ]]; then
+            aws ec2 revoke-security-group-ingress \
+              --group-id "$EC2_SECURITY_GROUP" \
+              --security-group-rule-ids "${{ steps.authorize_ingress.outputs.rule_id }}"
+          fi

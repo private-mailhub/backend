@@ -85,6 +85,10 @@ class EnvironmentVariables {
 
   @IsString()
   ENCRYPTION_KEY: string;
+
+  @IsString()
+  @IsOptional()
+  LEGACY_ENCRYPTION_KEYS?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

@@ -4,8 +4,8 @@
 
 - Original main: `3ff068ba6a206e825cc9dd32ef39490298926a49`.
 - Original production: `600e3a20b5a7624c82b0f109159e05704ca841eb`.
-- Backend remains https://github.com/private-mailhub/mailhub; no history rewrite or force-push.
-- Frontend: https://github.com/private-mailhub/mailhub-frontend (initially private).
+- Backend: https://github.com/private-mailhub/backend-api; no history rewrite or force-push.
+- Frontend: https://github.com/private-mailhub/client-web (initially private).
 - Local backup: `/Users/andy/mailhub-split-20260907/mailhub-before-split.bundle`.
   `git bundle verify` succeeded; includes local `feat/mailhub-cli` and all original refs.
 - Remote mirror: `/Users/andy/mailhub-split-20260907/upstream.git`; `git fsck --full` succeeded.
@@ -39,9 +39,10 @@ Production execution is pending, not claimed as completed:
 
 - EC2 SSH host/user/port, actual Node/npm, Nginx/PM2 config, active process CWD and artifact hashes.
 - Environment file supply, existing FE build values, DB backup recovery, resource headroom.
-- AWS OIDC trust and deploy permissions for the new frontend repository; SSH security group port.
+- AWS OIDC trust and deploy permissions for the new `client-web` repository; SSH security group port.
 - Existing and candidate authenticated DB/Redis readiness, session fingerprint compatibility.
-- Browser matrix (old FE/new BE, new FE/old BE, new/new), OAuth, controlled mail/SQS validation.
+- Browser matrix (old FE/new BE and new/new), expected rejection of new FE/old BE, OAuth, and
+  controlled mail/SQS validation.
 - Actual releases, worker consumer count, independent rollback and post-rollback checks.
 
 No production pointer, process, environment secret, IAM policy, database, or runtime was changed.
