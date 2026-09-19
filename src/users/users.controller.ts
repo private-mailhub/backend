@@ -42,7 +42,7 @@ export class UsersController {
     @CurrentUser() user: CurrentUserPayload,
     @Body() dto: ChangeUsernameDto,
   ): Promise<{ message: string }> {
-    await this.usersService.requestUsernameChange(user.userId, dto.encryptedNewUsername);
+    await this.usersService.requestUsernameChange(user.userId, dto);
     return { message: 'Verification code sent to new email' };
   }
 

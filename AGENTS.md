@@ -1,7 +1,7 @@
 # Mailhub backend
 
 This repository contains a NestJS 11 / TypeScript API and SQS worker, with TypeORM/MySQL and Redis.
-The React frontend is maintained in https://github.com/private-mailhub/mailhub-frontend.
+The React frontend is maintained in https://github.com/private-mailhub/client-web.
 Use the actual TypeScript/ES module style of adjacent files; the application is not Express/CommonJS.
 
 - Run from this repository root with the Node version in `.nvmrc`.

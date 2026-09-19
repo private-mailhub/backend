@@ -49,3 +49,9 @@ jobs:
 
       - name: Validate SSH host verification
         run: bash test/ssh-host-verification.sh
+
+      - name: Validate Nginx configuration policy
+        run: bash test/nginx-config.sh
+
+      - name: Validate deployment ingress policy
+        run: bash test/deploy-ingress.sh

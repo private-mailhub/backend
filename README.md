@@ -10,12 +10,12 @@
 
 <p align="center">
   <a href="https://private-mailhub.com">Try Mailhub</a> ·
-  <a href="https://github.com/private-mailhub/mailhub/releases">Releases</a> ·
-  <a href="https://github.com/private-mailhub/mailhub/issues">Issues</a>
+  <a href="https://github.com/private-mailhub/backend-api/releases">Releases</a> ·
+  <a href="https://github.com/private-mailhub/backend-api/issues">Issues</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/v/release/private-mailhub/mailhub" alt="Latest release" />
+  <img src="https://img.shields.io/github/v/release/private-mailhub/backend-api" alt="Latest release" />
   <img src="https://img.shields.io/badge/Node.js-24.14.1-brightgreen.svg" alt="Node.js 24.14.1" />
   <img src="https://img.shields.io/badge/NestJS-11.x-ea2845.svg" alt="NestJS 11" />
   <img src="https://img.shields.io/badge/React-18-61dafb.svg" alt="React 18" />
@@ -115,7 +115,7 @@ flowchart LR
 ## Self-hosting
 
 This repository contains the NestJS API and SQS worker at its root. The React application lives in
-[mailhub-frontend](https://github.com/private-mailhub/mailhub-frontend). Each repository installs,
+[client-web](https://github.com/private-mailhub/client-web). Each repository installs,
 checks, builds, and deploys independently.
 
 This repository does not provision AWS or DNS resources. Before running a worker, configure a SES
@@ -139,8 +139,8 @@ Apple sign-in control.
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/private-mailhub/mailhub.git
-cd mailhub
+git clone https://github.com/private-mailhub/backend-api.git
+cd backend-api
 
 npm ci
 
@@ -161,11 +161,12 @@ During repository separation, retain the existing key and data:
 openssl rand -base64 32
 ```
 
-The current browser client requires the same value in `.env` as `ENCRYPTION_KEY` and in
-the frontend repository’s `.env` as `VITE_ENCRYPTION_KEY`. Vite exposes `VITE_*` values in the browser bundle, so
-this value is an implementation compatibility value, not a server-only secret. Never put a JWT,
-AWS, Mailgun, OAuth, or other server secret in a `VITE_*` variable. Keep server-only values in a
-secrets manager and never commit `.env` files.
+`ENCRYPTION_KEY` is server-only. Do not put it, or any equivalent key, in the client-web
+repository or a `VITE_*` variable. The API accepts the new client’s plaintext `username` and
+`newUsername` fields over HTTPS and encrypts them before writing to MySQL or Redis. During the
+transition it also accepts exactly one of the legacy encrypted fields (`encryptedUsername` or
+`encryptedNewUsername`). Keep server-only values in a secrets manager and never commit `.env`
+files.
 
 The most important settings are:
 
@@ -174,14 +175,14 @@ The most important settings are:
 | `.env` | `APP_NAME`, `APP_DOMAIN`, `PORT`, `CORS_ORIGINS` | Application identity, relay domain, listener, and allowed browser origins. |
 | `.env` | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` | Database connection. |
 | `.env` | `REDIS_HOST`, `REDIS_PORT`, `REDIS_TTL` | Redis connection and cache lifetime. |
-| `.env` | `JWT_SECRET`, `ENCRYPTION_KEY` | Server configuration; `ENCRYPTION_KEY` must decode to 32 bytes. |
+| `.env` | `JWT_SECRET`, `ENCRYPTION_KEY` | Server-only configuration; `ENCRYPTION_KEY` must decode to 32 bytes. |
+| `.env` | `LEGACY_ENCRYPTION_KEYS` | Optional comma-separated previous 32-byte Base64 keys during staged rotation (maximum five; never used for new writes). |
 | `.env` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_S3_EMAIL_BUCKET`, `AWS_SQS_QUEUE_NAME`, `AWS_SQS_QUEUE_URL` | AWS SDK configuration used by the mail path and worker. |
 | `.env` | `NO_REPLY_ADDRESS`, `CONTACT_ADDRESS` | Service and support addresses. |
 | `.env` | `MAILGUN_API_KEY`, `MAILGUN_BASE_URL` | Valid Mailgun settings are required to send production mail. |
 | `.env` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional; required only for the corresponding web OAuth flow. |
 | `.env` | `APPLE_CLIENT_ID` | Used by the backend Apple OAuth endpoint; the current web UI does not expose that flow. |
-| the frontend repository’s `.env` | `VITE_API_URL` | Local default: `http://localhost:8080`. Do not append `/api`. |
-| the frontend repository’s `.env` | `VITE_ENCRYPTION_KEY` | Must match the backend value, but is visible to browser users. |
+| the client-web repository’s `.env` | `VITE_API_URL` | Local default: `http://localhost:8080`. Do not append `/api`. |
 
 The backend validates its core startup configuration. See each repository’s `.env.example` file for the
 complete list; optional OAuth settings are read only when their corresponding flow is used.
@@ -206,7 +207,7 @@ npm run start:dev
 ```
 
 The API is available at [http://localhost:8080/api](http://localhost:8080/api).
-Follow the [frontend README](https://github.com/private-mailhub/mailhub-frontend#readme) to start the UI.
+Follow the [client-web README](https://github.com/private-mailhub/client-web#readme) to start the UI.
 
 To run the SQS worker locally, start a second backend process with worker mode enabled. It requires
 the AWS S3/SQS resources to be configured:
@@ -243,10 +244,10 @@ Set `NODE_ENV=production` to use Mailgun for outbound email. Other environments 
 ## Security
 
 - Primary email addresses and reply-routing values are encrypted with AES-256-GCM before database or
-  cache storage.
-- `VITE_ENCRYPTION_KEY` is intentionally available to the browser bundle in the current design. It
-  can reduce accidental plaintext exposure in application storage, but it is not protection against
-  a browser-bundle or key compromise. Do not describe it as a server-only encryption secret.
+  cache storage. `ENCRYPTION_KEY` is server-only and new ciphertext always uses that current key.
+- During a staged rotation, `LEGACY_ENCRYPTION_KEYS` is read-only fallback state. Keep it populated
+  until all records have been rewritten with the current key, then remove retired keys.
+- Never expose an encryption key through `VITE_*`; Vite embeds those values in the browser bundle.
 - Use a separate, randomly generated `JWT_SECRET` per environment. Treat AWS, Mailgun, and OAuth
   credentials as server-only secrets.
 - Grant AWS and Mailgun credentials only the permissions required by the deployment.

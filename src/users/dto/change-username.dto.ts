@@ -1,7 +1,13 @@
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class ChangeUsernameDto {
+  @IsOptional()
   @IsNotEmpty()
   @IsString()
-  encryptedNewUsername: string;
+  newUsername?: string;
+
+  @IsOptional()
+  @IsNotEmpty()
+  @IsString()
+  encryptedNewUsername?: string;
 }

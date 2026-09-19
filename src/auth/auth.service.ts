@@ -18,6 +18,7 @@ import { ProtectionUtil } from 'src/common/utils/protection.util';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { UserActivityLogService } from '../logs/user-activity-log.service';
 import { UserActivityType } from '../common/enums/activity-type.enum';
+import { selectUsernameInput, type UsernameInput } from 'src/common/utils/username-input.util';
 
 @Injectable()
 export class AuthService {
@@ -33,8 +34,8 @@ export class AuthService {
     private readonly userActivityLogService: UserActivityLogService,
   ) {}
 
-  async sendVerificationCode(encryptedUsername: string): Promise<{ isNewUser: boolean }> {
-    const username = this.protectionUtil.decrypt(encryptedUsername);
+  async sendVerificationCode(input: UsernameInput): Promise<{ isNewUser: boolean }> {
+    const username = this.resolveUsername(input);
     const usernameHash = this.protectionUtil.hash(username);
 
     // Check if user exists
@@ -62,8 +63,9 @@ export class AuthService {
 
   async verifyCodeAndLogin(dto: LoginDto, ip: string, userAgent: string): Promise<AuthResponseDto> {
     // username is used only for create account
-    const { encryptedUsername, code } = dto;
-    const usernameHash = this.protectionUtil.hash(this.protectionUtil.decrypt(encryptedUsername));
+    const { code } = dto;
+    const username = this.resolveUsername(dto);
+    const usernameHash = this.protectionUtil.hash(username);
 
     // Check verification attempts
     const maxAttempts = this.customEnvService.getWithDefault<number>(
@@ -103,9 +105,9 @@ export class AuthService {
     let user = await this.usersService.findByUsernameHash(usernameHash);
 
     if (!user) {
-      user = await this.usersService.createEmailUser(encryptedUsername);
+      user = await this.usersService.createEmailUser(username);
       // Send welcome email
-      await this.sendMailService.sendWelcomeEmail(this.protectionUtil.decrypt(encryptedUsername));
+      await this.sendMailService.sendWelcomeEmail(username);
       await this.userActivityLogService.record(user.id, UserActivityType.SIGNUP);
     }
     // update last_logined_at
@@ -123,6 +125,15 @@ export class AuthService {
     await this.cacheService.setSession(refreshToken, fingerprint);
 
     return { accessToken, refreshToken };
+  }
+
+  private resolveUsername(input: UsernameInput): string {
+    const selectedInput = selectUsernameInput(input);
+    if (selectedInput.isEncrypted) {
+      return this.protectionUtil.decrypt(selectedInput.value);
+    }
+
+    return selectedInput.value;
   }
 
   async refreshTokens(

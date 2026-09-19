@@ -36,7 +36,7 @@ export class AuthController {
   async sendVerificationCode(
     @Body() dto: SendVerificationCodeDto,
   ): Promise<{ message: string; isNewUser: boolean }> {
-    const { isNewUser } = await this.authService.sendVerificationCode(dto.encryptedUsername);
+    const { isNewUser } = await this.authService.sendVerificationCode(dto);
     return { message: 'Verification code sent successfully', isNewUser };
   }
 

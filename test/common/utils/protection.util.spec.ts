@@ -1,5 +1,4 @@
 import * as crypto from 'crypto';
-import { InternalServerErrorException } from '@nestjs/common';
 import { ProtectionUtil } from 'src/common/utils/protection.util';
 import { CustomEnvService } from 'src/config/custom-env.service';
 
@@ -51,13 +50,14 @@ describe('ProtectionUtil', () => {
     });
 
     describe('Given a key that does not decode to 32 bytes', () => {
-      it('When encrypt is called, Then throws InternalServerErrorException', () => {
+      it('When the utility is created, Then rejects the invalid key before serving traffic', () => {
         // Given
         customEnvService.get.mockReturnValue('not-a-valid-32byte-base64-key');
-        const util = new ProtectionUtil(customEnvService);
 
         // When / Then
-        expect(() => util.encrypt('plaintext')).toThrow(InternalServerErrorException);
+        expect(() => new ProtectionUtil(customEnvService)).toThrow(
+          'ENCRYPTION_KEY must be canonical base64',
+        );
       });
     });
   });
@@ -81,13 +81,15 @@ describe('ProtectionUtil', () => {
     });
 
     describe('Given encrypted data that is missing parts (not "a:b:c" format)', () => {
-      it('When decrypt is called, Then throws Error containing "Decryption failed"', () => {
+      it('When decrypt is called, Then throws Error containing "Decryption failed" without logging the ciphertext', () => {
         // Given
         const invalidData = 'onlyonepart';
+        const loggerError = jest.spyOn((protectionUtil as any).logger, 'error');
 
         // When / Then
         expect(() => protectionUtil.decrypt(invalidData)).toThrow(Error);
         expect(() => protectionUtil.decrypt(invalidData)).toThrow('Decryption failed');
+        expect(loggerError.mock.calls.flat()).not.toContain(invalidData);
       });
     });
 
@@ -106,17 +108,53 @@ describe('ProtectionUtil', () => {
     });
 
     describe('Given a key that does not decode to 32 bytes', () => {
-      it('When decrypt is called, Then throws Error', () => {
-        // Given
-        const plaintext = 'Hello, World!';
-        const encrypted = protectionUtil.encrypt(plaintext);
-
+      it('When the utility is created, Then rejects the invalid key before serving traffic', () => {
         customEnvService.get.mockReturnValue('not-a-valid-32byte-base64-key');
-        const util = new ProtectionUtil(customEnvService);
 
         // When / Then
-        expect(() => util.decrypt(encrypted)).toThrow(Error);
-        expect(() => util.decrypt(encrypted)).toThrow('Decryption failed');
+        expect(() => new ProtectionUtil(customEnvService)).toThrow(
+          'ENCRYPTION_KEY must be canonical base64',
+        );
+      });
+    });
+
+    describe('Given a malformed legacy key', () => {
+      it('When the utility is created, Then rejects it before serving traffic', () => {
+        customEnvService.getWithDefault.mockReturnValue('not-base64');
+
+        expect(() => new ProtectionUtil(customEnvService)).toThrow(
+          'LEGACY_ENCRYPTION_KEYS must be canonical base64',
+        );
+      });
+    });
+
+    describe('Given ciphertext encrypted with the legacy key', () => {
+      it('When decrypt is called, Then decrypts it with the legacy key without logging the ciphertext', () => {
+        // Given
+        const currentKey = Buffer.alloc(32, 1).toString('base64');
+        const legacyKey = Buffer.alloc(32, 2).toString('base64');
+        const legacyUtil = new ProtectionUtil({
+          get: jest.fn((key: string) => (key === 'ENCRYPTION_KEY' ? legacyKey : undefined)),
+          getWithDefault: jest.fn(),
+        } as unknown as jest.Mocked<CustomEnvService>);
+        const ciphertext = legacyUtil.encrypt('legacy@example.com');
+        customEnvService.get.mockReturnValue(currentKey);
+        customEnvService.getWithDefault.mockImplementation((key: string) =>
+          key === 'LEGACY_ENCRYPTION_KEYS' ? legacyKey : '',
+        );
+        const utilWithFallback = new ProtectionUtil(customEnvService);
+        const loggerError = jest.spyOn((utilWithFallback as any).logger, 'error');
+
+        // When
+        const plaintext = utilWithFallback.decrypt(ciphertext);
+
+        // Then
+        expect(plaintext).toBe('legacy@example.com');
+        expect(loggerError).not.toHaveBeenCalledWith(
+          expect.stringContaining(ciphertext),
+          expect.anything(),
+        );
+        expect(loggerError.mock.calls.flat()).not.toContain(ciphertext);
       });
     });
   });
