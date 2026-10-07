@@ -41,7 +41,7 @@ export class RelayEmailsService {
     private readonly emailForwardingLogService: EmailForwardingLogService,
   ) {}
 
-  async generateRelayEmailAddress(user: User): Promise<RelayEmail> {
+  async generateRelayEmailAddress(user: User, description?: string): Promise<RelayEmail> {
     if (!isProTier(user)) {
       const count = await this.countByUser(user.id);
       if (count >= this.FREE_LIMIT) {
@@ -72,6 +72,7 @@ export class RelayEmailsService {
       userId: user.id,
       primaryEmail: user.username,
       relayEmail,
+      description: description?.trim() || null,
     });
 
     const savedRelayEmail = await this.relayEmailRepository.save(relayEmailEntity);

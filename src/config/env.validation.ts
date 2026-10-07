@@ -46,6 +46,14 @@ class EnvironmentVariables {
   @IsOptional()
   REDIS_TTL?: number;
 
+  @IsNumber()
+  @IsOptional()
+  CLI_API_KEY_TTL?: number;
+
+  @IsString()
+  @IsOptional()
+  CLI_DEVICE_VERIFICATION_URI?: string;
+
   @IsString()
   JWT_SECRET: string;
 

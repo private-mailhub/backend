@@ -1,8 +1,12 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthController } from './auth.controller';
+import { CliAuthController } from './cli-auth.controller';
+import { ApiKeysController } from './api-keys.controller';
 import { AuthService } from './auth.service';
 import { OAuthService } from './oauth.service';
+import { CliDeviceAuthService } from './cli-device-auth.service';
+import { ApiKeyService } from './api-key.service';
 import { TokenService } from './jwt/token.service';
 import { CacheModule } from '../cache/cache.module';
 import { UsersModule } from '../users/users.module';
@@ -34,8 +38,15 @@ import { ACCESS_TOKEN_TTL } from 'src/common/utils/policy';
     MailModule,
     LogsModule,
   ],
-  controllers: [AuthController],
-  providers: [AuthService, OAuthService, TokenService, ProtectionUtil],
-  exports: [AuthService, OAuthService, TokenService],
+  controllers: [AuthController, CliAuthController, ApiKeysController],
+  providers: [
+    AuthService,
+    OAuthService,
+    TokenService,
+    ProtectionUtil,
+    CliDeviceAuthService,
+    ApiKeyService,
+  ],
+  exports: [AuthService, OAuthService, TokenService, CliDeviceAuthService, ApiKeyService],
 })
 export class AuthModule {}
