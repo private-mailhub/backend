@@ -1,6 +1,7 @@
 import { BadRequestException, INestApplication, UnauthorizedException } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
+import { createHash } from 'crypto';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { applyHttpConfig } from '../../src/bootstrap/apply-http-config';
@@ -13,6 +14,10 @@ type MockRequest = {
   headers: { authorization?: string };
   user?: unknown;
 };
+
+const pollSecret = Buffer.alloc(32, 10).toString('base64url');
+const pollSecretHash = createHash('sha256').update(pollSecret).digest('hex');
+const wrongPollSecret = Buffer.alloc(32, 11).toString('base64url');
 
 describe('POST /api/auth/cli/device', () => {
   let app: INestApplication<App>;
@@ -76,6 +81,7 @@ describe('POST /api/auth/cli/device', () => {
       clientName: 'mailhub-cli',
       deviceName: 'Work Mac',
       cliVersion: '0.1.0',
+      pollSecretHash,
     };
     const authorization = {
       deviceCode: 'device-secret',
@@ -94,10 +100,50 @@ describe('POST /api/auth/cli/device', () => {
 
     // Then
     expect(response.body).toEqual({ result: 'success', data: authorization });
+    expect(response.body.data).not.toHaveProperty('pollSecretHash');
     expect(cliDeviceAuthService.startDeviceAuthorization).toHaveBeenCalledWith(
       requestBody,
       expect.any(String),
     );
+  });
+
+  it('필수 pollSecretHash가 없으면 인증 시작 서비스를 호출하지 않는다', async () => {
+    // Given
+    const requestBody = {
+      clientName: 'mailhub-cli',
+      deviceName: 'Work Mac',
+      cliVersion: '0.1.0',
+    };
+
+    // When
+    const response = await request(app.getHttpServer())
+      .post('/api/auth/cli/device')
+      .send(requestBody)
+      .expect(400);
+
+    // Then
+    expect(response.body.result).toBe('fail');
+    expect(cliDeviceAuthService.startDeviceAuthorization).not.toHaveBeenCalled();
+  });
+
+  it('형식이 잘못된 pollSecretHash는 인증 시작 서비스를 호출하지 않는다', async () => {
+    // Given
+    const requestBody = {
+      clientName: 'mailhub-cli',
+      deviceName: 'Work Mac',
+      cliVersion: '0.1.0',
+      pollSecretHash: 'not-a-sha256-hash',
+    };
+
+    // When
+    const response = await request(app.getHttpServer())
+      .post('/api/auth/cli/device')
+      .send(requestBody)
+      .expect(400);
+
+    // Then
+    expect(response.body.result).toBe('fail');
+    expect(cliDeviceAuthService.startDeviceAuthorization).not.toHaveBeenCalled();
   });
 });
 
@@ -344,13 +390,59 @@ describe('POST /api/auth/cli/device/token', () => {
     // When
     const response = await request(app.getHttpServer())
       .post('/api/auth/cli/device/token')
-      .send({ deviceCode: 'device-secret' })
+      .send({ deviceCode: 'device-secret', pollSecret })
       .expect(200);
 
     // Then
     expect(response.body).toEqual({ result: 'success', data: token });
     expect(cliDeviceAuthService.pollDeviceToken).toHaveBeenCalledWith(
       'device-secret',
+      pollSecret,
+      expect.any(String),
+    );
+  });
+
+  it('pollSecret 누락 시 서비스에 토큰 폴링을 전달하지 않는다', async () => {
+    // Given / When
+    const response = await request(app.getHttpServer())
+      .post('/api/auth/cli/device/token')
+      .send({ deviceCode: 'device-secret' })
+      .expect(400);
+
+    // Then
+    expect(response.body.result).toBe('fail');
+    expect(cliDeviceAuthService.pollDeviceToken).not.toHaveBeenCalled();
+  });
+
+  it('형식이 잘못된 pollSecret은 서비스에 전달하지 않는다', async () => {
+    // Given / When
+    const response = await request(app.getHttpServer())
+      .post('/api/auth/cli/device/token')
+      .send({ deviceCode: 'device-secret', pollSecret: 'invalid-secret' })
+      .expect(400);
+
+    // Then
+    expect(response.body.result).toBe('fail');
+    expect(cliDeviceAuthService.pollDeviceToken).not.toHaveBeenCalled();
+  });
+
+  it('틀린 pollSecret은 expired_token으로 거부한다', async () => {
+    // Given
+    cliDeviceAuthService.pollDeviceToken.mockRejectedValue(
+      new BadRequestException('expired_token'),
+    );
+
+    // When
+    const response = await request(app.getHttpServer())
+      .post('/api/auth/cli/device/token')
+      .send({ deviceCode: 'device-secret', pollSecret: wrongPollSecret })
+      .expect(400);
+
+    // Then
+    expect(response.body).toEqual({ result: 'fail', data: 'expired_token' });
+    expect(cliDeviceAuthService.pollDeviceToken).toHaveBeenCalledWith(
+      'device-secret',
+      wrongPollSecret,
       expect.any(String),
     );
   });
@@ -364,7 +456,7 @@ describe('POST /api/auth/cli/device/token', () => {
     // When
     const response = await request(app.getHttpServer())
       .post('/api/auth/cli/device/token')
-      .send({ deviceCode: 'device-secret' })
+      .send({ deviceCode: 'device-secret', pollSecret })
       .expect(400);
 
     // Then

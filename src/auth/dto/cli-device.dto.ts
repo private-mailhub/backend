@@ -13,6 +13,11 @@ export class StartCliDeviceAuthorizationDto {
   @IsString()
   @MaxLength(50)
   cliVersion: string;
+
+  @IsNotEmpty()
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/)
+  pollSecretHash: string;
 }
 
 export class PollCliDeviceTokenDto {
@@ -20,6 +25,11 @@ export class PollCliDeviceTokenDto {
   @IsString()
   @MaxLength(128)
   deviceCode: string;
+
+  @IsNotEmpty()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]{43}$/)
+  pollSecret: string;
 }
 
 export class CliUserCodeDto {

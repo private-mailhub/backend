@@ -53,6 +53,11 @@ interface ApiKeyRecord {
   revokedAt: string | null;
 }
 
+interface ApiKeyMaterial {
+  publicId: string;
+  secret: string;
+}
+
 export interface ApiKeySummary {
   id: string;
   publicId: string;
@@ -82,7 +87,11 @@ export class ApiKeyService {
     @Optional() private readonly usersService?: UsersService,
   ) {}
 
-  async create(userId: bigint, input: CreateApiKeyInput): Promise<CreatedApiKey> {
+  async create(
+    userId: bigint,
+    input: CreateApiKeyInput,
+    idempotencySeed?: string,
+  ): Promise<CreatedApiKey> {
     await this.requireActiveUser(userId, false);
     this.validateScopes(input.scopes);
     if (input.source !== 'cli') {
@@ -91,8 +100,16 @@ export class ApiKeyService {
 
     const ttlMs = this.getApiKeyTtl();
     const name = this.normalizeName(input.name);
+    const keyMaterial = this.getIdempotentKeyMaterial(idempotencySeed);
+    if (keyMaterial) {
+      const existingKey = await this.findIdempotentKey(userId, input, name, keyMaterial);
+      if (existingKey) {
+        return existingKey;
+      }
+    }
+
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const createdKey = await this.createOneKey(userId, input, name, ttlMs);
+      const createdKey = await this.createOneKey(userId, input, name, ttlMs, keyMaterial);
       if (createdKey) {
         return createdKey;
       }
@@ -105,9 +122,10 @@ export class ApiKeyService {
     input: CreateApiKeyInput,
     name: string,
     ttlMs: number,
+    keyMaterial: ApiKeyMaterial | null,
   ): Promise<CreatedApiKey | null> {
-    const publicId = crypto.randomBytes(16).toString('base64url');
-    const secret = crypto.randomBytes(32).toString('base64url');
+    const material = keyMaterial ?? this.createRandomKeyMaterial();
+    const { publicId, secret } = material;
     const apiKey = `${API_KEY_PREFIX}${publicId}_${secret}`;
     const keyId = await this.cacheRepository.increment('api-key:sequence');
     if (this.isInvalidKeyId(keyId)) {
@@ -130,29 +148,135 @@ export class ApiKeyService {
       revokedAt: null,
     };
 
-    const result = await this.cacheRepository.setApiKeyWithQuota(
-      this.getRecordKey(publicId),
-      record,
-      ttlMs,
-      this.getOwnerIndexKey(userId),
-      publicId,
-      userId.toString(),
-      MAX_API_KEYS_PER_USER,
-    );
+    let result: 'created' | 'limit' | 'collision';
+    try {
+      result = await this.cacheRepository.setApiKeyWithQuota(
+        this.getRecordKey(publicId),
+        record,
+        ttlMs,
+        this.getOwnerIndexKey(userId),
+        publicId,
+        userId.toString(),
+        MAX_API_KEYS_PER_USER,
+      );
+    } catch (error) {
+      if (keyMaterial) {
+        const existingKey = await this.findIdempotentKey(userId, input, name, keyMaterial);
+        if (existingKey) {
+          return existingKey;
+        }
+      }
+      throw error;
+    }
     if (result === 'limit') {
       throw new ConflictException(
         `Maximum of ${MAX_API_KEYS_PER_USER} API key records may be retained per account; revoked records are removed after ${REVOKED_API_KEY_RETENTION_DAYS} days and expired keys are removed automatically.`,
       );
     }
     if (result === 'collision') {
+      if (keyMaterial) {
+        return this.findIdempotentKey(userId, input, name, keyMaterial);
+      }
       return null;
     }
 
+    return this.toCreatedApiKey(record, apiKey);
+  }
+
+  private getIdempotentKeyMaterial(idempotencySeed?: string): ApiKeyMaterial | null {
+    if (idempotencySeed === undefined) {
+      return null;
+    }
+    if (!this.isCanonicalBase64Url(idempotencySeed, 32)) {
+      throw new BadRequestException('Invalid API key idempotency seed');
+    }
+
+    const seed = Buffer.from(idempotencySeed, 'base64url');
+    const publicId = crypto
+      .createHmac('sha256', seed)
+      .update('mailhub:api-key:public-id', 'utf8')
+      .digest()
+      .subarray(0, 16)
+      .toString('base64url');
+    const apiKeySecret = crypto
+      .createHmac('sha256', seed)
+      .update('mailhub:api-key:secret', 'utf8')
+      .digest('base64url');
+    return { publicId, secret: apiKeySecret };
+  }
+
+  private createRandomKeyMaterial(): ApiKeyMaterial {
+    return {
+      publicId: crypto.randomBytes(16).toString('base64url'),
+      secret: crypto.randomBytes(32).toString('base64url'),
+    };
+  }
+
+  private async findIdempotentKey(
+    userId: bigint,
+    input: CreateApiKeyInput,
+    name: string,
+    keyMaterial: ApiKeyMaterial,
+  ): Promise<CreatedApiKey | null> {
+    const record = await this.cacheRepository.get<ApiKeyRecord>(
+      this.getRecordKey(keyMaterial.publicId),
+    );
+    if (record === null) {
+      return null;
+    }
+    if (!this.isValidRecord(record, keyMaterial.publicId)) {
+      throw new InternalServerErrorException('API key idempotency record is invalid');
+    }
+    if (!this.isMatchingIdempotentRecord(record, userId, input, name, keyMaterial.secret)) {
+      throw new InternalServerErrorException('API key idempotency record does not match');
+    }
+    if (this.isExpiredOrRevoked(record)) {
+      throw new ConflictException('API key issuance is no longer available');
+    }
+    const apiKey = `${API_KEY_PREFIX}${keyMaterial.publicId}_${keyMaterial.secret}`;
+    return this.toCreatedApiKey(record, apiKey);
+  }
+
+  private isMatchingIdempotentRecord(
+    record: ApiKeyRecord,
+    userId: bigint,
+    input: CreateApiKeyInput,
+    name: string,
+    secret: string,
+  ): boolean {
+    if (record.userId !== userId.toString()) {
+      return false;
+    }
+    if (record.secretHash !== this.protectionUtil.hash(secret)) {
+      return false;
+    }
+    if (record.name !== name) {
+      return false;
+    }
+    if (record.source !== input.source) {
+      return false;
+    }
+    return this.hasSameScopes(record.scopes, input.scopes);
+  }
+
+  private hasSameScopes(first: ApiKeyScope[], second: ApiKeyScope[]): boolean {
+    if (first.length !== second.length) {
+      return false;
+    }
+    for (let index = 0; index < first.length; index += 1) {
+      if (first[index] !== second[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private toCreatedApiKey(record: ApiKeyRecord, apiKey: string): CreatedApiKey {
     return {
       apiKey,
-      keyId,
-      expiresAt,
-      scopes: [...input.scopes],
+      keyId: record.id,
+      expiresAt: record.expiresAt,
+      scopes: [...record.scopes],
     };
   }
 

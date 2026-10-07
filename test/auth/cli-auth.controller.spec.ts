@@ -26,6 +26,7 @@ describe('CliAuthController', () => {
       clientName: 'mailhub-cli',
       deviceName: 'Work Mac',
       cliVersion: '0.1.0',
+      pollSecretHash: 'a'.repeat(64),
     };
     const request = {
       socket: { remoteAddress: '127.0.0.1' },
@@ -48,6 +49,7 @@ describe('CliAuthController', () => {
       clientName: 'mailhub-cli',
       deviceName: 'Work Mac',
       cliVersion: '0.1.0',
+      pollSecretHash: 'a'.repeat(64),
     };
     const request = {
       socket: { remoteAddress: '198.51.100.23' },

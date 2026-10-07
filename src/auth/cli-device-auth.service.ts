@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   HttpException,
   HttpStatus,
@@ -10,13 +9,9 @@ import {
   Optional,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
-import {
-  ApiKeyService,
-  API_KEY_SCOPES,
-  type ApiKeyScope,
-  type CreatedApiKey,
-} from './api-key.service';
+import { ApiKeyService, API_KEY_SCOPES, type ApiKeyScope } from './api-key.service';
 import { CacheRepository } from '../cache/cache.repository';
+import { ProtectionUtil } from '../common/utils/protection.util';
 import { CustomEnvService } from '../config/custom-env.service';
 import { UsersService } from '../users/users.service';
 import { UserStatus } from '../users/user.enums';
@@ -30,10 +25,13 @@ interface DeviceAuthorizationRecord {
   cliVersion: string;
   status: DeviceAuthorizationStatus;
   userId: string | null;
+  pollSecretHash: string;
   createdAt: string;
   expiresAt: string;
   decidedAt: string | null;
   scopes: ApiKeyScope[];
+  consumedAt?: string | null;
+  encryptedIdempotencySeed?: string | null;
 }
 
 export interface PublicDeviceAuthorization {
@@ -53,6 +51,7 @@ export interface DeviceTokenResponse {
 }
 
 const DEVICE_AUTHORIZATION_TTL_MS = 10 * 60 * 1000;
+const DEVICE_CONSUMED_RETRY_GRACE_MS = 60 * 1000;
 const DEVICE_POLL_INTERVAL_SECONDS = 5;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const DEVICE_START_LIMIT = 10;
@@ -66,6 +65,7 @@ export class CliDeviceAuthService {
   constructor(
     private readonly cacheRepository: CacheRepository,
     private readonly apiKeyService: ApiKeyService,
+    private readonly protectionUtil: ProtectionUtil,
     private readonly customEnvService: CustomEnvService,
     @Optional() private readonly usersService?: UsersService,
   ) {}
@@ -96,10 +96,13 @@ export class CliDeviceAuthService {
         cliVersion: input.cliVersion.trim(),
         status: 'pending',
         userId: null,
+        pollSecretHash: input.pollSecretHash,
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + DEVICE_AUTHORIZATION_TTL_MS).toISOString(),
         decidedAt: null,
         scopes: [...API_KEY_SCOPES],
+        consumedAt: null,
+        encryptedIdempotencySeed: null,
       };
       const created = await this.cacheRepository.setManyIfAbsentWithExpiry([
         {
@@ -179,12 +182,25 @@ export class CliDeviceAuthService {
     return this.resolveRepeatedDecision(latest, userId);
   }
 
-  async pollDeviceToken(deviceCode: string, clientIp = 'unknown'): Promise<DeviceTokenResponse> {
+  async pollDeviceToken(
+    deviceCode: string,
+    pollSecret: string,
+    clientIp = 'unknown',
+  ): Promise<DeviceTokenResponse> {
     await this.enforceRateLimit('poll', clientIp, DEVICE_POLL_LIMIT, true);
     const normalizedDeviceCode = this.validateDeviceCode(deviceCode);
+    const normalizedPollSecret = this.validatePollSecret(pollSecret);
     const deviceCodeHash = this.hash(normalizedDeviceCode);
     const state = await this.getStateByDeviceHash(deviceCodeHash);
+    if (!this.isPollSecretMatch(normalizedPollSecret, state.pollSecretHash)) {
+      throw new BadRequestException('expired_token');
+    }
     this.ensureNotExpired(state);
+    if (state.status === 'consumed') {
+      if (!this.isConsumedRetryWithinGracePeriod(state)) {
+        throw new BadRequestException('expired_token');
+      }
+    }
 
     if (state.status === 'pending') {
       throw new BadRequestException('authorization_pending');
@@ -192,7 +208,7 @@ export class CliDeviceAuthService {
     if (state.status === 'denied') {
       throw new BadRequestException('access_denied');
     }
-    if (state.status !== 'approved') {
+    if (!this.isRecoverableTokenStatus(state.status)) {
       throw new BadRequestException('expired_token');
     }
     if (state.userId === null) {
@@ -201,36 +217,42 @@ export class CliDeviceAuthService {
 
     const approvedUserId = BigInt(state.userId);
     await this.requireActiveUser(approvedUserId);
-    const issuingState: DeviceAuthorizationRecord = { ...state, status: 'issuing' };
-    const claimed = await this.cacheRepository.transitionJson(
-      this.getDeviceStateKey(deviceCodeHash),
-      'approved',
-      issuingState,
-    );
-    if (!claimed) {
-      throw new BadRequestException('expired_token');
+    let issuingState = state;
+    if (state.status === 'approved') {
+      const idempotencySeed = crypto.randomBytes(32).toString('base64url');
+      issuingState = {
+        ...state,
+        status: 'issuing',
+        encryptedIdempotencySeed: this.protectionUtil.encrypt(idempotencySeed),
+      };
+      const claimed = await this.cacheRepository.transitionJson(
+        this.getDeviceStateKey(deviceCodeHash),
+        'approved',
+        issuingState,
+      );
+      if (!claimed) {
+        const latest = await this.getStateByDeviceHash(deviceCodeHash);
+        if (!this.isRecoverableClaimState(latest, approvedUserId)) {
+          throw new BadRequestException('expired_token');
+        }
+        issuingState = latest;
+      }
     }
 
-    let issuedKey: CreatedApiKey;
-    try {
-      issuedKey = await this.apiKeyService.create(approvedUserId, {
+    const idempotencySeed = this.getIdempotencySeed(issuingState);
+    const issuedKey = await this.apiKeyService.create(
+      approvedUserId,
+      {
         name: state.deviceName,
         source: 'cli',
         scopes: [...state.scopes],
-      });
-    } catch (error) {
-      if (error instanceof ConflictException) {
-        await this.cacheRepository.transitionJson(
-          this.getDeviceStateKey(deviceCodeHash),
-          'issuing',
-          state,
-        );
-      }
-      throw error;
-    }
+      },
+      idempotencySeed,
+    );
     const consumedState: DeviceAuthorizationRecord = {
       ...issuingState,
       status: 'consumed',
+      consumedAt: new Date().toISOString(),
     };
     const consumed = await this.cacheRepository.transitionJson(
       this.getDeviceStateKey(deviceCodeHash),
@@ -238,13 +260,110 @@ export class CliDeviceAuthService {
       consumedState,
     );
     if (!consumed) {
-      throw new InternalServerErrorException('Could not complete device authorization');
+      const latest = await this.getStateByDeviceHash(deviceCodeHash);
+      if (latest.status !== 'consumed' || latest.userId !== approvedUserId.toString()) {
+        throw new InternalServerErrorException('Could not complete device authorization');
+      }
     }
 
     return {
       ...issuedKey,
       keyId: String(issuedKey.keyId),
     };
+  }
+
+  private isRecoverableTokenStatus(status: DeviceAuthorizationStatus): boolean {
+    if (status === 'approved') {
+      return true;
+    }
+    if (status === 'issuing') {
+      return true;
+    }
+    return status === 'consumed';
+  }
+
+  private isRecoverableClaimState(
+    state: DeviceAuthorizationRecord,
+    approvedUserId: bigint,
+  ): boolean {
+    if (state.userId !== approvedUserId.toString()) {
+      return false;
+    }
+    if (state.status === 'issuing') {
+      return true;
+    }
+    return state.status === 'consumed';
+  }
+
+  private isConsumedRetryWithinGracePeriod(state: DeviceAuthorizationRecord): boolean {
+    if (typeof state.consumedAt !== 'string') {
+      return false;
+    }
+    const consumedAt = Date.parse(state.consumedAt);
+    if (!Number.isFinite(consumedAt)) {
+      return false;
+    }
+    const age = Date.now() - consumedAt;
+    if (age < 0) {
+      return false;
+    }
+    return age <= DEVICE_CONSUMED_RETRY_GRACE_MS;
+  }
+
+  private getIdempotencySeed(state: DeviceAuthorizationRecord): string {
+    const encryptedSeed = state.encryptedIdempotencySeed;
+    if (typeof encryptedSeed !== 'string' || encryptedSeed.length === 0) {
+      throw new InternalServerErrorException('Could not recover device authorization');
+    }
+
+    let seed: string;
+    try {
+      seed = this.protectionUtil.decrypt(encryptedSeed);
+    } catch {
+      throw new InternalServerErrorException('Could not recover device authorization');
+    }
+    if (!this.isValidIdempotencySeed(seed)) {
+      throw new InternalServerErrorException('Could not recover device authorization');
+    }
+    return seed;
+  }
+
+  private isValidIdempotencySeed(seed: string): boolean {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(seed)) {
+      return false;
+    }
+    const decoded = Buffer.from(seed, 'base64url');
+    if (decoded.length !== 32) {
+      return false;
+    }
+    return decoded.toString('base64url') === seed;
+  }
+
+  private validatePollSecret(pollSecret: string): string {
+    if (!this.isValidPollSecret(pollSecret)) {
+      throw new BadRequestException('expired_token');
+    }
+    return pollSecret;
+  }
+
+  private isValidPollSecret(pollSecret: string): boolean {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(pollSecret)) {
+      return false;
+    }
+    const decoded = Buffer.from(pollSecret, 'base64url');
+    if (decoded.length !== 32) {
+      return false;
+    }
+    return decoded.toString('base64url') === pollSecret;
+  }
+
+  private isPollSecretMatch(pollSecret: string, expectedHash: string): boolean {
+    const actual = Buffer.from(this.hash(pollSecret), 'hex');
+    const expected = Buffer.from(expectedHash, 'hex');
+    if (actual.length !== expected.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(actual, expected);
   }
 
   private async getStateAndDeviceHashByUserCode(
@@ -337,6 +456,9 @@ export class CliDeviceAuthService {
     if (this.isInvalidStartValue(input.cliVersion, 50)) {
       throw new BadRequestException('CLI version must contain 1 to 50 characters');
     }
+    if (!/^[a-f0-9]{64}$/.test(input.pollSecretHash)) {
+      throw new BadRequestException('Invalid device authorization request');
+    }
   }
 
   private isInvalidStartValue(value: string, maximumLength: number): boolean {
@@ -421,6 +543,12 @@ export class CliDeviceAuthService {
         return false;
       }
     }
+    if (typeof candidate.pollSecretHash !== 'string') {
+      return false;
+    }
+    if (!/^[a-f0-9]{64}$/.test(candidate.pollSecretHash)) {
+      return false;
+    }
     if (typeof candidate.createdAt !== 'string') {
       return false;
     }
@@ -438,6 +566,25 @@ export class CliDeviceAuthService {
     }
     if (!Number.isFinite(Date.parse(candidate.expiresAt))) {
       return false;
+    }
+    if (candidate.consumedAt !== undefined && candidate.consumedAt !== null) {
+      if (typeof candidate.consumedAt !== 'string') {
+        return false;
+      }
+      if (!Number.isFinite(Date.parse(candidate.consumedAt))) {
+        return false;
+      }
+    }
+    if (
+      candidate.encryptedIdempotencySeed !== undefined &&
+      candidate.encryptedIdempotencySeed !== null
+    ) {
+      if (typeof candidate.encryptedIdempotencySeed !== 'string') {
+        return false;
+      }
+      if (candidate.encryptedIdempotencySeed.length > 512) {
+        return false;
+      }
     }
     if (!Array.isArray(candidate.scopes)) {
       return false;
