@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/main.png" alt="Mailhub logo" width="120" />
+  <img src="docs/logo.png" alt="Mailhub logo" width="120" />
 </p>
 
 <h1 align="center">Mailhub</h1>
