@@ -28,7 +28,11 @@ export class CliAuthController {
   @Post('device/token')
   @HttpCode(HttpStatus.OK)
   async pollDeviceToken(@Body() dto: PollCliDeviceTokenDto, @Req() request: Request) {
-    return this.cliDeviceAuthService.pollDeviceToken(dto.deviceCode, this.getClientIp(request));
+    return this.cliDeviceAuthService.pollDeviceToken(
+      dto.deviceCode,
+      dto.pollSecret,
+      this.getClientIp(request),
+    );
   }
 
   @Post('device/authorization')

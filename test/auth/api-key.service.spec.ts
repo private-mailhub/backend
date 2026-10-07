@@ -22,12 +22,14 @@ describe('ApiKeyService', () => {
   let values: Map<string, unknown>;
   let sets: Map<string, Set<string>>;
   let expiresAtByKey: Map<string, number>;
+  let jwtSecret: string;
 
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-10-07T00:00:00.000Z'));
     values = new Map();
     sets = new Map();
     expiresAtByKey = new Map();
+    jwtSecret = 'stable-test-secret-for-api-key-idempotency';
     let sequence = 0;
     cacheRepository = {
       set: jest.fn((key: string, value: unknown) => {
@@ -171,7 +173,7 @@ describe('ApiKeyService', () => {
       hash: jest.fn((value: string) => createHash('sha256').update(value).digest('hex')),
     } as unknown as jest.Mocked<ProtectionUtil>;
     const customEnvService = {
-      get: jest.fn((_key: string) => undefined),
+      get: jest.fn((key: string) => (key === 'JWT_SECRET' ? jwtSecret : undefined)),
       getWithDefault: jest.fn((_key: string, fallback: unknown) => fallback),
     } as unknown as CustomEnvService;
     usersService = {
@@ -219,6 +221,90 @@ describe('ApiKeyService', () => {
       expect(cacheRepository.setApiKeyWithQuota.mock.calls).toHaveLength(1);
       expect(protectionUtil.hash.mock.calls).toContainEqual([secret]);
       expect(usersService.findById.mock.calls).toContainEqual([ownerId]);
+    });
+
+    it('Redis 저장 전 일시적인 실패 뒤 같은 idempotency key로 다시 발급한다', async () => {
+      // Given
+      const ownerId = 17n;
+      const input = {
+        name: 'Work Mac',
+        source: 'cli',
+        scopes: ['relay:read'] as const,
+      };
+      const idempotencyKey = Buffer.alloc(32, 1).toString('base64url');
+      cacheRepository.setApiKeyWithQuota.mockRejectedValueOnce(
+        new Error('Temporary Redis failure before write'),
+      );
+
+      // When
+      await expect(service.create(ownerId, input, idempotencyKey)).rejects.toThrow(
+        'Temporary Redis failure before write',
+      );
+      expect(values.size).toBe(0);
+      const firstSuccessfulIssue = await service.create(ownerId, input, idempotencyKey);
+      const retriedIssue = await service.create(ownerId, input, idempotencyKey);
+
+      // Then
+      expect(retriedIssue.apiKey).toBe(firstSuccessfulIssue.apiKey);
+      expect(retriedIssue.keyId).toBe(firstSuccessfulIssue.keyId);
+      expect(cacheRepository.increment.mock.calls).toHaveLength(2);
+      expect(cacheRepository.setApiKeyWithQuota.mock.calls).toHaveLength(2);
+      expect(sets.get('api-key:owner:17')?.size).toBe(1);
+    });
+
+    it('Redis 저장 후 응답이 유실돼도 이미 저장된 idempotent API 키를 반환한다', async () => {
+      // Given
+      const ownerId = 17n;
+      const input = {
+        name: 'Work Mac',
+        source: 'cli',
+        scopes: ['relay:read'] as const,
+      };
+      const idempotencyKey = Buffer.alloc(32, 2).toString('base64url');
+      cacheRepository.setApiKeyWithQuota.mockImplementationOnce(
+        (key: string, value: unknown, ttlMs: number, setKey: string, member: string) => {
+          values.set(key, value);
+          expiresAtByKey.set(key, Date.now() + ttlMs);
+          const members = sets.get(setKey) ?? new Set<string>();
+          members.add(member);
+          sets.set(setKey, members);
+          return Promise.reject(new Error('Redis response lost after commit'));
+        },
+      );
+
+      // When
+      const result = await service.create(ownerId, input, idempotencyKey);
+      const retriedResult = await service.create(ownerId, input, idempotencyKey);
+
+      // Then
+      expect(result.apiKey).toBe(retriedResult.apiKey);
+      expect(result.keyId).toBe(retriedResult.keyId);
+      expect(cacheRepository.increment.mock.calls).toHaveLength(1);
+      expect(cacheRepository.setApiKeyWithQuota.mock.calls).toHaveLength(1);
+      expect(values.size).toBe(1);
+      expect(sets.get('api-key:owner:17')?.size).toBe(1);
+    });
+
+    it('JWT secret이 바뀐 뒤에도 같은 grant seed로 같은 API 키를 반환한다', async () => {
+      // Given
+      const ownerId = 17n;
+      const input = {
+        name: 'Work Mac',
+        source: 'cli',
+        scopes: ['relay:read' as const],
+      };
+      const grantSeed = Buffer.alloc(32, 3).toString('base64url');
+      const firstToken = await service.create(ownerId, input, grantSeed);
+      jwtSecret = 'rotated-test-secret-after-authorization';
+
+      // When
+      const retriedToken = await service.create(ownerId, input, grantSeed);
+
+      // Then
+      expect(retriedToken.apiKey).toBe(firstToken.apiKey);
+      expect(retriedToken.keyId).toBe(firstToken.keyId);
+      expect(cacheRepository.setApiKeyWithQuota.mock.calls).toHaveLength(1);
+      expect(sets.get('api-key:owner:17')?.size).toBe(1);
     });
   });
 

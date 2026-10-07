@@ -6,27 +6,39 @@ import {
   HttpStatus,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { CacheRepository } from '../../src/cache/cache.repository';
 import { ApiKeyService } from '../../src/auth/api-key.service';
 import { CliDeviceAuthService } from '../../src/auth/cli-device-auth.service';
+import { ProtectionUtil } from '../../src/common/utils/protection.util';
 import { UsersService } from '../../src/users/users.service';
 import { UserStatus } from '../../src/users/user.enums';
 
 type CacheValue = { value: unknown; expiresAt: number | null };
 const testClientIp = '203.0.113.7';
+const testPollSecret = Buffer.alloc(32, 7).toString('base64url');
+const wrongPollSecret = Buffer.alloc(32, 8).toString('base64url');
+const malformedPollSecret = `${'A'.repeat(42)}B`;
+const testPollSecretHash = createHash('sha256').update(testPollSecret).digest('hex');
 
 describe('CliDeviceAuthService', () => {
   let service: CliDeviceAuthService;
   let cacheRepository: CacheRepository & Record<string, jest.Mock>;
   let apiKeyService: jest.Mocked<ApiKeyService>;
+  let protectionUtil: jest.Mocked<ProtectionUtil>;
   let usersService: jest.Mocked<UsersService>;
   let values: Map<string, CacheValue>;
   let counters: Map<string, { count: number; expiresAt: number }>;
+  let encryptedSeeds: Map<string, string>;
+  let deviceAuthorizationSecret: string;
 
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-10-07T00:00:00.000Z'));
     values = new Map();
     counters = new Map();
+    encryptedSeeds = new Map();
+    deviceAuthorizationSecret = 'stable-test-secret-for-cli-device-auth';
+    let encryptedSeedSequence = 0;
     let sequence = 0;
     cacheRepository = {
       set: jest.fn((key: string, value: unknown, ttl?: number) => {
@@ -119,9 +131,24 @@ describe('CliDeviceAuthService', () => {
       }),
     } as unknown as jest.Mocked<ApiKeyService>;
 
+    protectionUtil = {
+      encrypt: jest.fn((seed: string) => {
+        const encryptedSeed = `encrypted-grant-seed-${++encryptedSeedSequence}`;
+        encryptedSeeds.set(encryptedSeed, seed);
+        return encryptedSeed;
+      }),
+      decrypt: jest.fn((encryptedSeed: string) => {
+        const seed = encryptedSeeds.get(encryptedSeed);
+        if (!seed) {
+          throw new Error('Grant seed could not be decrypted');
+        }
+        return seed;
+      }),
+    } as unknown as jest.Mocked<ProtectionUtil>;
+
     const customEnvService = {
       get: jest.fn((key: string) => {
-        return key === 'JWT_SECRET' ? 'stable-test-secret-for-cli-device-auth' : undefined;
+        return key === 'JWT_SECRET' ? deviceAuthorizationSecret : undefined;
       }),
       getWithDefault: jest.fn((key: string, fallback: string) =>
         key === 'CLI_DEVICE_VERIFICATION_URI'
@@ -141,6 +168,7 @@ describe('CliDeviceAuthService', () => {
     service = new CliDeviceAuthService(
       cacheRepository,
       apiKeyService,
+      protectionUtil,
       customEnvService as never,
       usersService,
     );
@@ -155,6 +183,7 @@ describe('CliDeviceAuthService', () => {
       // Given
       const input = {
         clientName: 'mailhub-cli',
+        pollSecretHash: testPollSecretHash,
         deviceName: 'Work Mac',
         cliVersion: '0.1.0',
       };
@@ -171,15 +200,19 @@ describe('CliDeviceAuthService', () => {
       expect(result.deviceCode).toEqual(expect.any(String));
       expect(result.userCode).toEqual(expect.any(String));
       expect(result.deviceCode).not.toBe(result.userCode);
+      expect(result).not.toHaveProperty('pollSecretHash');
       const storedState = JSON.stringify([...values.entries()]);
       expect(storedState).not.toContain(result.deviceCode);
       expect(storedState).not.toContain(result.userCode);
+      expect(storedState).not.toContain(testPollSecret);
+      expect(storedState).toContain(testPollSecretHash);
     });
 
     it('같은 IP에서 기기 인증 요청이 10회를 넘으면 인증 시도를 제한한다', async () => {
       // Given
       const input = {
         clientName: 'mailhub-cli',
+        pollSecretHash: testPollSecretHash,
         deviceName: 'Work Mac',
         cliVersion: '0.1.0',
       };
@@ -207,6 +240,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -243,6 +277,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -266,6 +301,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -296,6 +332,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -317,6 +354,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -328,7 +366,7 @@ describe('CliDeviceAuthService', () => {
 
       // Then
       await expect(
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ).rejects.toMatchObject({ message: 'access_denied' });
       expect(apiKeyService.create.mock.calls).toHaveLength(0);
     });
@@ -338,6 +376,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -356,6 +395,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -381,6 +421,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -389,9 +430,89 @@ describe('CliDeviceAuthService', () => {
 
       // When / Then
       await expect(
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ).rejects.toMatchObject({ message: 'authorization_pending' });
       expect(cacheRepository.getAndDelete.mock.calls).toHaveLength(0);
+    });
+
+    it('pending 요청은 틀리거나 빠진 pollSecret에 상태를 노출하지 않는다', async () => {
+      // Given
+      const authorization = await service.startDeviceAuthorization(
+        {
+          clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
+          deviceName: 'Work Mac',
+          cliVersion: '0.1.0',
+        },
+        testClientIp,
+      );
+
+      // When / Then
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, wrongPollSecret, testClientIp),
+      ).rejects.toMatchObject({ message: 'expired_token' });
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, undefined as never, testClientIp),
+      ).rejects.toMatchObject({ message: 'expired_token' });
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, malformedPollSecret, testClientIp),
+      ).rejects.toMatchObject({ message: 'expired_token' });
+      expect(apiKeyService.create.mock.calls).toHaveLength(0);
+      expect(cacheRepository.transitionJson.mock.calls).toHaveLength(0);
+    });
+
+    it('승인된 요청은 틀리거나 빠진 pollSecret에 발급을 시작하지 않는다', async () => {
+      // Given
+      const authorization = await service.startDeviceAuthorization(
+        {
+          clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
+          deviceName: 'Work Mac',
+          cliVersion: '0.1.0',
+        },
+        testClientIp,
+      );
+      await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
+      const transitionCountAfterApproval = cacheRepository.transitionJson.mock.calls.length;
+
+      // When / Then
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, wrongPollSecret, testClientIp),
+      ).rejects.toMatchObject({ message: 'expired_token' });
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, undefined as never, testClientIp),
+      ).rejects.toMatchObject({ message: 'expired_token' });
+      expect(cacheRepository.transitionJson.mock.calls).toHaveLength(transitionCountAfterApproval);
+      expect(apiKeyService.create.mock.calls).toHaveLength(0);
+    });
+
+    it('소비된 deviceCode만으로는 API 키를 다시 가져올 수 없다', async () => {
+      // Given
+      const authorization = await service.startDeviceAuthorization(
+        {
+          clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
+          deviceName: 'Work Mac',
+          cliVersion: '0.1.0',
+        },
+        testClientIp,
+      );
+      await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
+      const issuedToken = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
+
+      // When / Then
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, wrongPollSecret, testClientIp),
+      ).rejects.toMatchObject({ message: 'expired_token' });
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, undefined as never, testClientIp),
+      ).rejects.toMatchObject({ message: 'expired_token' });
+      expect(issuedToken.apiKey).toMatch(/^mhk_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{43}$/);
+      expect(apiKeyService.create.mock.calls).toHaveLength(1);
     });
 
     it('같은 IP에서 폴링이 20회를 넘으면 slow_down을 반환하고 pending 요청은 유지한다', async () => {
@@ -399,6 +520,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -406,13 +528,13 @@ describe('CliDeviceAuthService', () => {
       );
       for (let requestNumber = 0; requestNumber < 20; requestNumber += 1) {
         await expect(
-          service.pollDeviceToken(authorization.deviceCode, testClientIp),
+          service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
         ).rejects.toMatchObject({ message: 'authorization_pending' });
       }
 
       // When / Then
       await expect(
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ).rejects.toMatchObject({ message: 'slow_down' });
       expect(cacheRepository.getAndDelete.mock.calls).toHaveLength(0);
     });
@@ -422,6 +544,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -430,21 +553,26 @@ describe('CliDeviceAuthService', () => {
 
       // When
       await expect(
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ).rejects.toMatchObject({ message: 'authorization_pending' });
       await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
-      const token = await service.pollDeviceToken(authorization.deviceCode, testClientIp);
+      const token = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
 
       // Then
       expect(token.apiKey).toMatch(/^mhk_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{43}$/);
       expect(apiKeyService.create.mock.calls).toHaveLength(1);
     });
 
-    it('승인된 요청은 형식이 맞는 API 키를 한 번만 반환한다', async () => {
+    it('승인된 요청은 60초 동안 같은 API 키를 반환하고 이후 재사용을 거부한다', async () => {
       // Given
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -453,7 +581,11 @@ describe('CliDeviceAuthService', () => {
       await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
 
       // When
-      const token = await service.pollDeviceToken(authorization.deviceCode, testClientIp);
+      const token = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
 
       // Then
       expect(token).toMatchObject({
@@ -464,17 +596,29 @@ describe('CliDeviceAuthService', () => {
       });
       expect(typeof token.keyId).toBe('string');
       expect(apiKeyService.create.mock.calls).toHaveLength(1);
+      const retryToken = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
+      expect(retryToken.apiKey).toBe(token.apiKey);
+      expect(retryToken.keyId).toBe(token.keyId);
+      expect(apiKeyService.create.mock.calls).toHaveLength(2);
+
+      // The original authorization lifetime is longer than the consumed-key recovery window.
+      jest.advanceTimersByTime(60_001);
       await expect(
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ).rejects.toMatchObject({ message: 'expired_token' });
-      expect(apiKeyService.create.mock.calls).toHaveLength(1);
+      expect(apiKeyService.create.mock.calls).toHaveLength(2);
     });
 
-    it('키 할당량 초과 후 승인 상태를 복구해 재시도를 허용한다', async () => {
+    it('키 할당량 초과 뒤 issuing 상태와 seed를 보존해 재시도를 허용한다', async () => {
       // Given
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -489,15 +633,235 @@ describe('CliDeviceAuthService', () => {
 
       // When
       await expect(
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ).rejects.toBeInstanceOf(ConflictException);
-      const stateEntry = [...values.entries()].find(([key]) => key.startsWith('cli:device:state:'));
-      const token = await service.pollDeviceToken(authorization.deviceCode, testClientIp);
+      const stateKey = [...values.keys()].find((key) => key.startsWith('cli:device:state:'));
+      const issuingState = values.get(stateKey!)?.value as {
+        status: string;
+        encryptedIdempotencySeed: string | null;
+      };
+      expect(issuingState.status).toBe('issuing');
+      expect(issuingState.encryptedIdempotencySeed).toMatch(/^encrypted-grant-seed-/);
+      const token = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
 
       // Then
-      expect((stateEntry?.[1].value as { status: string } | undefined)?.status).toBe('approved');
+      expect((values.get(stateKey!)?.value as { status: string } | undefined)?.status).toBe(
+        'consumed',
+      );
       expect(token.keyId).toBe('41');
       expect(apiKeyService.create.mock.calls).toHaveLength(2);
+    });
+
+    it('일시적인 키 발급 실패 뒤 issuing 상태를 이어서 같은 idempotency key로 재시도한다', async () => {
+      // Given
+      const authorization = await service.startDeviceAuthorization(
+        {
+          clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
+          deviceName: 'Work Mac',
+          cliVersion: '0.1.0',
+        },
+        testClientIp,
+      );
+      await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
+      apiKeyService.create.mockRejectedValueOnce(new Error('Temporary key service failure'));
+
+      // When
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
+      ).rejects.toThrow('Temporary key service failure');
+      const stateKey = [...values.keys()].find((key) => key.startsWith('cli:device:state:'));
+      expect((values.get(stateKey!)?.value as { status: string } | undefined)?.status).toBe(
+        'issuing',
+      );
+      const issuingState = values.get(stateKey!)?.value as {
+        encryptedIdempotencySeed?: string;
+      };
+      expect(issuingState.encryptedIdempotencySeed).toMatch(/^encrypted-grant-seed-/);
+      const firstIdempotencySeed = apiKeyService.create.mock.calls[0][2] as string;
+      expect(Buffer.from(firstIdempotencySeed, 'base64url')).toHaveLength(32);
+      expect(JSON.stringify(issuingState)).not.toContain(firstIdempotencySeed);
+      expect(encryptedSeeds.get(issuingState.encryptedIdempotencySeed!)).toBe(firstIdempotencySeed);
+      deviceAuthorizationSecret = 'rotated-test-secret-during-token-retry';
+      const token = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
+
+      // Then
+      expect(token.keyId).toBe('41');
+      expect(apiKeyService.create.mock.calls).toHaveLength(2);
+      const idempotencyKeys = apiKeyService.create.mock.calls.map(([, , idempotencyKey]) =>
+        String(idempotencyKey),
+      );
+      expect(Buffer.from(idempotencyKeys[0], 'base64url')).toHaveLength(32);
+      expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+      expect((values.get(stateKey!)?.value as { status: string } | undefined)?.status).toBe(
+        'consumed',
+      );
+    });
+
+    it('최종 상태 전환을 재시도해 이미 발급된 키를 같은 결과로 반환한다', async () => {
+      // Given
+      const authorization = await service.startDeviceAuthorization(
+        {
+          clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
+          deviceName: 'Work Mac',
+          cliVersion: '0.1.0',
+        },
+        testClientIp,
+      );
+      await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
+      const originalTransition = cacheRepository.transitionJson.getMockImplementation() as (
+        key: string,
+        expectedStatus: string,
+        nextValue: unknown,
+      ) => Promise<boolean>;
+      let failFinalTransition = true;
+      cacheRepository.transitionJson.mockImplementation((key, expectedStatus, nextValue) => {
+        const nextStatus = (nextValue as { status?: string }).status;
+        if (failFinalTransition && expectedStatus === 'issuing' && nextStatus === 'consumed') {
+          failFinalTransition = false;
+          return Promise.resolve(false);
+        }
+        return originalTransition(key, expectedStatus, nextValue);
+      });
+
+      // When
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
+      ).rejects.toMatchObject({ message: 'Could not complete device authorization' });
+      const stateKey = [...values.keys()].find((key) => key.startsWith('cli:device:state:'));
+      expect((values.get(stateKey!)?.value as { status: string } | undefined)?.status).toBe(
+        'issuing',
+      );
+      const retriedToken = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
+
+      // Then
+      expect(retriedToken.apiKey).toMatch(/^mhk_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{43}$/);
+      expect(retriedToken.keyId).toBe('41');
+      expect(apiKeyService.create.mock.calls).toHaveLength(2);
+      expect(apiKeyService.create.mock.calls[1][2]).toBe(apiKeyService.create.mock.calls[0][2]);
+      expect((values.get(stateKey!)?.value as { status: string } | undefined)?.status).toBe(
+        'consumed',
+      );
+    });
+
+    it('소비 전환 응답이 유실된 뒤 이미 소비된 상태에서 같은 키 발급을 복구한다', async () => {
+      // Given
+      const authorization = await service.startDeviceAuthorization(
+        {
+          clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
+          deviceName: 'Work Mac',
+          cliVersion: '0.1.0',
+        },
+        testClientIp,
+      );
+      await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
+      const originalTransition = cacheRepository.transitionJson.getMockImplementation() as (
+        key: string,
+        expectedStatus: string,
+        nextValue: unknown,
+      ) => Promise<boolean>;
+      let loseFinalResponse = true;
+      cacheRepository.transitionJson.mockImplementation((key, expectedStatus, nextValue) => {
+        const nextStatus = (nextValue as { status?: string }).status;
+        if (loseFinalResponse && expectedStatus === 'issuing' && nextStatus === 'consumed') {
+          loseFinalResponse = false;
+          return originalTransition(key, expectedStatus, nextValue).then(() => {
+            return Promise.reject(new Error('Redis response lost after consume commit'));
+          });
+        }
+        return originalTransition(key, expectedStatus, nextValue);
+      });
+
+      // When
+      await expect(
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
+      ).rejects.toThrow('Redis response lost after consume commit');
+      const recoveredToken = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
+
+      // Then
+      expect(recoveredToken.keyId).toBe('41');
+      expect(apiKeyService.create.mock.calls).toHaveLength(2);
+      expect(apiKeyService.create.mock.calls[1][2]).toBe(apiKeyService.create.mock.calls[0][2]);
+      const stateKey = [...values.keys()].find((key) => key.startsWith('cli:device:state:'));
+      expect((values.get(stateKey!)?.value as { status: string } | undefined)?.status).toBe(
+        'consumed',
+      );
+    });
+
+    it('승인 상태 전환에서 같은 사용자의 동시 폴링이 먼저 소비한 키를 복구한다', async () => {
+      // Given
+      const authorization = await service.startDeviceAuthorization(
+        {
+          clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
+          deviceName: 'Work Mac',
+          cliVersion: '0.1.0',
+        },
+        testClientIp,
+      );
+      await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
+      const concurrentWinnerSeed = Buffer.alloc(32, 4).toString('base64url');
+      const encryptedConcurrentWinnerSeed = protectionUtil.encrypt(concurrentWinnerSeed);
+      const originalTransition = cacheRepository.transitionJson.getMockImplementation() as (
+        key: string,
+        expectedStatus: string,
+        nextValue: unknown,
+      ) => Promise<boolean>;
+      cacheRepository.transitionJson.mockImplementation((key, expectedStatus, nextValue) => {
+        if (
+          expectedStatus === 'approved' &&
+          (nextValue as { status?: string }).status === 'issuing'
+        ) {
+          const current = values.get(key);
+          if (current) {
+            values.set(key, {
+              ...current,
+              value: {
+                ...(current.value as object),
+                status: 'consumed',
+                consumedAt: new Date().toISOString(),
+                encryptedIdempotencySeed: encryptedConcurrentWinnerSeed,
+              },
+            });
+          }
+          return Promise.resolve(false);
+        }
+        return originalTransition(key, expectedStatus, nextValue);
+      });
+
+      // When
+      const token = await service.pollDeviceToken(
+        authorization.deviceCode,
+        testPollSecret,
+        testClientIp,
+      );
+
+      // Then
+      expect(token.keyId).toBe('41');
+      expect(apiKeyService.create.mock.calls).toHaveLength(1);
+      expect(apiKeyService.create.mock.calls[0][2]).toBe(concurrentWinnerSeed);
+      const stateKey = [...values.keys()].find((key) => key.startsWith('cli:device:state:'));
+      expect((values.get(stateKey!)?.value as { status: string } | undefined)?.status).toBe(
+        'consumed',
+      );
     });
 
     it('만료된 요청은 expired_token을 반환한다', async () => {
@@ -505,6 +869,7 @@ describe('CliDeviceAuthService', () => {
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -514,16 +879,17 @@ describe('CliDeviceAuthService', () => {
 
       // When / Then
       await expect(
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ).rejects.toMatchObject({ message: 'expired_token' });
       expect(apiKeyService.create.mock.calls).toHaveLength(0);
     });
 
-    it('동시에 폴링해도 API 키는 한 번만 발급한다', async () => {
+    it('동시 폴링은 같은 idempotent API 키와 키 ID를 반환한다', async () => {
       // Given
       const authorization = await service.startDeviceAuthorization(
         {
           clientName: 'mailhub-cli',
+          pollSecretHash: testPollSecretHash,
           deviceName: 'Work Mac',
           cliVersion: '0.1.0',
         },
@@ -532,14 +898,19 @@ describe('CliDeviceAuthService', () => {
       await service.decideAuthorization(7n, authorization.userCode, true, testClientIp);
 
       // When
-      const results = await Promise.allSettled([
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
-        service.pollDeviceToken(authorization.deviceCode, testClientIp),
+      const results = await Promise.all([
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
+        service.pollDeviceToken(authorization.deviceCode, testPollSecret, testClientIp),
       ]);
 
       // Then
-      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-      expect(apiKeyService.create.mock.calls).toHaveLength(1);
+      expect(results[0].apiKey).toBe(results[1].apiKey);
+      expect(results[0].keyId).toBe(results[1].keyId);
+      expect(apiKeyService.create.mock.calls).toHaveLength(2);
+      expect(
+        Buffer.from(apiKeyService.create.mock.calls[0][2] as string, 'base64url'),
+      ).toHaveLength(32);
+      expect(apiKeyService.create.mock.calls[1][2]).toBe(apiKeyService.create.mock.calls[0][2]);
     });
   });
 });
