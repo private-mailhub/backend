@@ -1,7 +1,8 @@
-import { IsEmail, IsNotEmpty } from 'class-validator';
+import { IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class CreateRelayDto {
-  @IsNotEmpty()
-  @IsEmail()
-  primaryEmail: string;
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  description?: string;
 }

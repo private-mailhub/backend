@@ -12,6 +12,7 @@ import { CustomEnvService } from '../config/custom-env.service';
         stores: [
           createKeyv(
             `redis://${customEnvService.get<string>('REDIS_HOST')}:${customEnvService.get<string>('REDIS_PORT')}`,
+            { throwOnErrors: true },
           ),
         ],
         isGlobal: true,
@@ -20,6 +21,6 @@ import { CustomEnvService } from '../config/custom-env.service';
     }),
   ],
   providers: [CacheRepository, CacheService],
-  exports: [CacheService],
+  exports: [CacheService, CacheRepository],
 })
 export class CacheModule {}

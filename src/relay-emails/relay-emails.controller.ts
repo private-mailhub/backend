@@ -17,6 +17,8 @@ import { UpdateDescriptionDto } from './dto/update-description.dto';
 import { UpdateActiveStatusDto } from './dto/update-active-status.dto';
 import { CurrentUser, type CurrentUserPayload } from '../common/decorators/current-user.decorator';
 import { RelayEmail } from './entities/relay-email.entity';
+import { CreateRelayDto } from './dto/create-relay.dto';
+import { ApiKeyAccess } from '../common/decorators/api-key-access.decorator';
 
 @Controller('relay-emails')
 export class RelayEmailsController {
@@ -27,6 +29,7 @@ export class RelayEmailsController {
   ) {}
 
   @Get()
+  @ApiKeyAccess('relay:read')
   @HttpCode(HttpStatus.OK)
   async getRelayEmails(@CurrentUser() user: CurrentUserPayload) {
     const relayEmails = await this.relayEmailsService.findByUser(user.userId);
@@ -44,18 +47,30 @@ export class RelayEmailsController {
   }
 
   @Post('create')
+  @ApiKeyAccess('relay:write')
   @HttpCode(HttpStatus.CREATED)
   async createRelayEmail(
     @CurrentUser() currentUser: CurrentUserPayload,
-  ): Promise<Partial<RelayEmail>> {
+    @Body() dto?: CreateRelayDto,
+  ): Promise<{
+    id: string;
+    relayEmail: string;
+    isActive: boolean;
+    description: string | null;
+    createdAt: Date;
+  }> {
     // Check subscription tier and limit
     const userEntity = await this.usersService.findById(currentUser.userId);
     if (!userEntity) {
       throw new NotFoundException('User not found');
     }
 
-    const relayEmailEntity = await this.relayEmailsService.generateRelayEmailAddress(userEntity);
+    const relayEmailEntity = await this.relayEmailsService.generateRelayEmailAddress(
+      userEntity,
+      dto?.description,
+    );
     return {
+      id: relayEmailEntity.id.toString(),
       relayEmail: relayEmailEntity.relayEmail,
       isActive: relayEmailEntity.isActive,
       description: relayEmailEntity.description,
@@ -89,6 +104,7 @@ export class RelayEmailsController {
   }
 
   @Patch(':id/description')
+  @ApiKeyAccess('relay:write')
   @HttpCode(HttpStatus.OK)
   async updateDescription(
     @CurrentUser() user: CurrentUserPayload,
@@ -108,6 +124,7 @@ export class RelayEmailsController {
   }
 
   @Patch(':id/active')
+  @ApiKeyAccess('relay:write')
   @HttpCode(HttpStatus.OK)
   async updateActiveStatus(
     @CurrentUser() user: CurrentUserPayload,
