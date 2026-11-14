@@ -258,7 +258,7 @@ To report a vulnerability, please do not open a public issue. Email
 
 ## Roadmap
 
-- [ ] Improve reply-relay handling and sender privacy
+- [x] Improve reply-relay handling and sender privacy
 - [ ] Move the email worker to AWS Lambda for cost efficiency
 - [ ] Add AI-powered email summarization
 - [ ] Add browser extension and mobile apps
