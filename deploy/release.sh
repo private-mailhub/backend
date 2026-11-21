@@ -7,7 +7,10 @@ die() {
   exit 1
 }
 
-if [[ $# -ne 2 ]]; then
+# Also sourced by the CodeDeploy transaction, whose outer flock already covers
+# preparation, activation and rollback. No environment flag skips the CLI lock.
+prepare_backend_release() (
+if [[ $# -lt 2 || $# -gt 3 ]]; then
   die "usage: $0 <40-hex-sha> <backend-archive>"
 fi
 
@@ -83,13 +86,11 @@ validate_archive() {
 }
 
 mkdir -p "$releases_dir"
-mkdir -p "$(dirname "$lock_path")"
-exec 9>"$lock_path"
-command -v flock >/dev/null 2>&1 || die 'flock is required for backend deployment locking'
-flock -x 9
 
 [[ -f "$shared_env" && ! -L "$shared_env" ]] || die "shared environment file is missing: $shared_env"
-[[ ! -e "$release_dir" && ! -L "$release_dir" ]] || die "release already exists: $release_dir"
+if [[ -e "$release_dir" || -L "$release_dir" ]]; then
+  [[ -n "${3:-}" && -d "$release_dir" && ! -L "$release_dir" ]] || die "release already exists: $release_dir"
+fi
 
 validate_archive
 stage_dir=$(mktemp -d "$releases_dir/.${release_sha}.tmp.XXXXXX")
@@ -120,7 +121,28 @@ actual_node_version=$(node --version) || die 'node is required for backend depen
 
 [[ -f "$stage_dir/dist/main.js" ]] || die 'dist/main.js is missing after dependency installation'
 ln -s "$shared_env" "$stage_dir/.env"
+if [[ -n "${3:-}" ]]; then
+  [[ -d "$stage_dir/node_modules" && ! -L "$stage_dir/node_modules" ]] || die 'installed dependencies missing'
+  if [[ -d "$release_dir" ]]; then
+    node "$3" "$stage_dir" "$release_dir" || die 'existing release differs from clean installation'
+    printf 'Verified existing backend release: %s\n' "$release_dir"
+    exit 0
+  fi
+fi
 mv "$stage_dir" "$release_dir"
 stage_dir=''
 
 printf 'Prepared backend release: %s\n' "$release_dir"
+
+)
+
+# The legacy prepare-only CLI (including bash -s over SSH) keeps its own lock.
+if [[ ${BASH_SOURCE[0]:-} == "$0" || -z ${BASH_SOURCE[0]:-} ]]; then
+  lock_path=${MAILHUB_DEPLOY_LOCK:-/var/lock/mailhub-deploy.lock}
+  [[ "$lock_path" == /* ]] || die 'deploy lock must be absolute'
+  mkdir -p "$(dirname "$lock_path")"
+  exec 9>>"$lock_path"
+  flock -x 9
+  [[ $# -eq 2 ]] || die "usage: $0 <40-hex-sha> <backend-archive>"
+  prepare_backend_release "$@" 9>&-
+fi
