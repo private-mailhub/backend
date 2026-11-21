@@ -4,11 +4,12 @@
 
 ## Verify locally
 
-Use `.nvmrc` (24.14.1), npm, and `zip`. From the repository root:
+Use `.nvmrc` (24.14.1), npm, `zip`, and Ruby (standard-library YAML for the cross-stack capacity check). From the repository root:
 
 ```sh
 npm ci --engine-strict
 npm run worker:test
+ruby scripts/worker/check-capacity.rb
 node --test scripts/worker/*.test.cjs
 npm run worker:package
 sam validate --lint --region us-east-1 --template-file infra/worker/template.yaml
@@ -22,7 +23,7 @@ The package uses `tsc` (including Nest/TypeORM decorator metadata) and the commi
 * Supply **existing** same-account, same-region standard source queue, corresponding DLQ, private mail bucket/prefix, artifact bucket, two Secrets Manager ARNs, worker SG, and private subnets. The stack does not own or replace SES rules/identities, S3 notifications, S3 buckets, SQS policies/queues or DLQs. It cannot update their settings. Confirm event envelope shape; non-S3/foreign sources fail closed. Use `get-queue-attributes` to confirm redrive target, **3 to 5 receives**, visibility **at least 270 seconds** (6 × 45-second function timeout), DLQ retention longer than source, and delivery policy permitting that source. Verify any CMK key policies. Correct pre-existing settings only under separate owner approval, never using the rollout script.
 * Do **not** create a NAT gateway. Use existing private, non-public database endpoint (or already approved RDS Proxy) and SG-to-SG SQL ingress, existing S3/Secrets Manager routes and DNS, and an already-approved HTTPS egress path to the Mailgun regional API for production. The Lambda service polls SQS; the process does not make queue calls. If Mailgun or any dependency is unreachable from the private subnet, stop. An isolated capture does not need Mailgun egress. Cloud costs include Lambda, SQS polling, Secrets Manager, existing egress/endpoints, Logs, alarms and artifact storage. Budget and alarms owner must approve before execution.
 * Supply a dedicated least-privileged DB principal for mail tables only, not the RDS master or a migration user. The database secret is a JSON object with `host` (certificate hostname), `dbname`, `username`, `password`, optional `port`. App secret: `APP_NAME`, `APP_DOMAIN`, `ENCRYPTION_KEY`, optional `LEGACY_ENCRYPTION_KEYS`; production additionally needs `MAILGUN_API_KEY` and `MAILGUN_BASE_URL` (US or EU HTTPS API root). Do not copy API JWT, Redis, OAuth, static AWS keys or other API configuration. Nothing retrieves secret values in Actions or puts them in CloudFormation/Lambda environment variables. Encryption format must match the existing worker; do not rotate application keys as a rollout step. Cold starts fetch current secrets. After rotation recycle execution environments through a reviewed version update; leave old DB/application credentials valid for the staged handoff. TLS verifies both the CA chain (`/var/runtime/ca-cert.pem`) and exact hostname using mysql2's `verifyIdentity`. No SSL verification bypass.
-* Apply the additive `mail_deliveries` migration separately on the correct DB, with backup and old-worker compatibility reviewed. Runtime sync and migrations are disabled. Connection cap is two pool connections per environment, two concurrent worker invocations; allow transient overlap of old/new warm environments and the probe when sizing DB headroom.
+* Apply the additive `mail_deliveries` migration separately on the correct DB, with backup and old-worker compatibility reviewed. Runtime sync and migrations are disabled. The function reserves **3 concurrent invocations** across all versions: the one live SQS mapping is capped at **2 deliveries**, leaving one slot for the sequential pre/post-traffic candidate probes. Avoid simultaneous manual invocations during a release. With a two-connection pool per execution environment, budget for up to **6 DB connections from active worker environments** (2 deliveries + 1 probe), plus idle pools on old/new warm environments and other DB clients. Six is not a database-wide connection limit. Verify regional Lambda quota and RDS headroom before rollout; do not increase queue throughput to use the spare slot.
 
 ## Isolated fixture and production handoff
 
