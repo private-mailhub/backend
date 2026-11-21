@@ -21,6 +21,8 @@ jobs:
       - run: npm ci --engine-strict
       - name: Check capacity for the queue and deployment probe
         run: ruby scripts/worker/check-capacity.rb
+      - name: Check optional dead-letter queue template (offline)
+        run: ruby infra/worker/optional-dlq/test_template.rb
       - run: npm run worker:test && node --test scripts/worker/*.test.cjs
       - run: npm run worker:package
       - uses: aws-actions/setup-sam@v2
