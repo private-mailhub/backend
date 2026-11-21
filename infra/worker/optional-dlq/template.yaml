@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Optional queue-owner stack. Creates a dead-letter target without attaching its source.
+Parameters:
+  ExistingSourceQueueName:
+    Type: String
+    Description: Verified name of one existing Standard source queue in this account and region.
+    AllowedPattern: '[A-Za-z0-9_-]{1,80}'
+    ConstraintDescription: Supply a Standard queue name of 1 to 80 letters, digits, hyphens or underscores.
+Rules:
+  ProjectRegion:
+    Assertions:
+      - Assert:
+          Fn::Equals: [{ Ref: 'AWS::Region' }, us-east-1]
+        AssertDescription: The project requires this stack to be in us-east-1.
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      FifoQueue: false
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - Fn::Sub: 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${ExistingSourceQueueName}'
+Outputs:
+  DeadLetterQueueArn:
+    Value:
+      Fn::GetAtt: [DeadLetterQueue, Arn]
