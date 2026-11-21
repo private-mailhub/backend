@@ -7,6 +7,7 @@ on:
 permissions: { contents: read }
 jobs:
   verify:
+    name: mail-worker-offline
     runs-on: ubuntu-latest
     env:
       AWS_DEFAULT_REGION: us-east-1

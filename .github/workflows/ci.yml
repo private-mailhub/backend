@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   verify:
+    name: backend-quality
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,6 +26,8 @@ jobs:
         with:
           node-version: 24.14.1
           cache: npm
+
+      - run: ruby test/ci-required-contexts.rb
 
       - name: Install dependencies
         run: npm ci --engine-strict
