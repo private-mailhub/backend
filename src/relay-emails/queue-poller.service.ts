@@ -1,41 +1,54 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { RelayEmailsService } from 'src/relay-emails/relay-emails.service';
+import { SqsService } from '../aws/sqs/sqs.service';
+import { MailRecordProcessor } from './mail-record-processor';
 
 @Injectable()
-export class QueuePollerService implements OnModuleInit {
+export class QueuePollerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(QueuePollerService.name);
-  private isWorkerMode = false;
-  private isProcessing = false;
+  private enabled = false;
+  private inFlight?: Promise<void>;
+  constructor(
+    private readonly sqs: SqsService,
+    private readonly processor: MailRecordProcessor,
+  ) {}
 
-  constructor(private readonly relayEmailService: RelayEmailsService) {}
-
-  onModuleInit() {
-    this.isWorkerMode = process.env.WORKER_MODE === 'true';
-
-    if (!this.isWorkerMode) {
-      this.logger.warn('Queue polling is DISABLED - Not in worker mode');
-      this.logger.warn('Set WORKER_MODE=true to enable polling');
-      return;
-    }
-
-    this.logger.log('Queue Poller Service initialized');
-    this.logger.log('Queue polling will run every 30 seconds');
+  onModuleInit(): void {
+    this.enabled = process.env.WORKER_MODE === 'true';
   }
 
   @Cron(CronExpression.EVERY_10_SECONDS)
-  async pollSQS() {
-    // Skip polling if not in worker mode or already processing
-    if (!this.isWorkerMode || this.isProcessing) {
-      return;
-    }
-    this.isProcessing = true;
+  async pollSQS(): Promise<void> {
+    if (!this.enabled || this.inFlight) return;
+    this.inFlight = this.receiveBatch();
     try {
-      await this.relayEmailService.processIncomingEmails();
-    } catch (error) {
-      this.logger.error(`Failed to poll SQS: ${error.message}`, error.stack);
+      await this.inFlight;
+    } catch {
+      this.logger.error('SQS receive failed');
     } finally {
-      this.isProcessing = false;
+      this.inFlight = undefined;
     }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    this.enabled = false;
+    // Includes a pending long poll, every record in a started batch and its deletes.
+    await this.inFlight?.catch(() => undefined);
+    this.logger.log('Queue polling drained');
+  }
+
+  private async receiveBatch(): Promise<void> {
+    const messages = await this.sqs.receiveMessages(10);
+    if (!this.enabled) return; // Returned during drain: untouched, becomes visible again.
+    const results = await Promise.allSettled(
+      messages.map(async (message) => {
+        if (!message.Body || !message.ReceiptHandle) throw new Error('Missing SQS envelope field');
+        await this.processor.processSqsBody(message.Body);
+        await this.sqs.deleteMessage(message.ReceiptHandle);
+      }),
+    );
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    if (failed)
+      this.logger.warn(`${failed} SQS message(s) not acknowledged; retry/redrive required`);
   }
 }
