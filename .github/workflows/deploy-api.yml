@@ -1,0 +1,88 @@
+name: Deploy API only
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'src/worker-lambda/**'
+      - 'infra/worker/**'
+      - '.github/workflows/deploy-worker.yml'
+permissions:
+  contents: read
+concurrency:
+  group: mailhub-api-production
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && vars.CODEDEPLOY_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || vars.CODEDEPLOY_AUTO_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --engine-strict
+      - run: npm run lint && npm run typecheck
+      - run: npm test -- --runInBand --no-cache --watchman=false && npm run test:e2e -- --runInBand
+      - run: npm run build
+      - run: bash test/deploy-release.sh && bash test/nginx-config.sh && bash test/api-codedeploy.sh && bash test/api-publish.sh
+      - name: Package only the verified API and hooks
+        run: bash deploy/package-api.sh "$GITHUB_SHA" "$RUNNER_TEMP/api.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-${{ github.sha }}
+          path: ${{ runner.temp }}/api.zip
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      DEPLOY_BUCKET: ${{ vars.DEPLOY_BUCKET }}
+      CODEDEPLOY_APP: ${{ vars.CODEDEPLOY_APP }}
+      CODEDEPLOY_GROUP: ${{ vars.CODEDEPLOY_GROUP }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: api-${{ github.sha }}
+          path: ${{ runner.temp }}/api-revision
+      - name: Validate target and artifact
+        run: |
+          set -euo pipefail
+          : "${AWS_REGION:?}" "${AWS_ROLE_ARN:?}" "${DEPLOY_BUCKET:?}" "${CODEDEPLOY_APP:?}" "${CODEDEPLOY_GROUP:?}"
+          test "$AWS_REGION" = us-east-1
+          archive="$RUNNER_TEMP/api-revision/api.zip"
+          unzip -tq "$archive"
+          test "$(unzip -p "$archive" revision.txt)" = "$GITHUB_SHA"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: mailhub-api-${{ github.run_id }}
+      - name: Publish versioned revision and wait for CodeDeploy
+        run: bash deploy/publish-api.sh "$RUNNER_TEMP/api-revision/api.zip"
+      - name: Check the public homepage after CodeDeploy
+        run: |
+          set -euo pipefail
+          page="$RUNNER_TEMP/mailhub-home.html"
+          curl --proto '=https' --fail --silent --show-error --location --max-redirs 2 --max-time 15 --retry 2 https://private-mailhub.com/ -o "$page"
+          grep -qi '<title>Mailhub</title>' "$page"
+          file=$(grep -Eo '/assets/[-a-zA-Z0-9._]+\.js' "$page" | head -n 1)
+          test -n "$file"
+          curl --proto '=https' --fail --silent --show-error --max-time 15 "https://private-mailhub.com$file" -o /dev/null -w '%{content_type}' | grep -Eiq 'javascript|ecmascript'
