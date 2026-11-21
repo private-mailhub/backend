@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..", "outDir": "./build/staging", "declaration": false,
+    "incremental": false, "sourceMap": false, "noEmitOnError": true
+  },
+  "files": ["../../src/worker-lambda/handler.ts"],
+  "include": [], "exclude": ["../../test", "**/*.spec.ts"]
+}

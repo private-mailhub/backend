@@ -1,0 +1,80 @@
+name: Worker preview or publish (never activates a queue)
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Preview only by default; publish requires the protected environment gate
+        required: true
+        type: choice
+        default: preview
+        options: [preview, publish]
+      stage:
+        description: Protected environment; isolated must be a different AWS account
+        required: true
+        type: choice
+        options: [isolated, production]
+permissions: { contents: read }
+concurrency:
+  group: worker-deploy-${{ inputs.stage }}
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.sha }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24.14.1', cache: npm }
+      - run: npm ci --engine-strict && npm run worker:test && node --test scripts/worker/*.test.cjs && npm run worker:package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: worker-${{ github.sha }}
+          path: |
+            infra/worker/build/worker.zip
+            infra/worker/build/worker.sha256
+          retention-days: 3
+          if-no-files-found: error
+  prepare:
+    needs: package
+    if: github.ref == 'refs/heads/main' && vars.WORKER_CHANGESETS_ENABLED == 'true'
+    environment: worker-${{ inputs.stage }}
+    permissions: { contents: read, id-token: write }
+    runs-on: ubuntu-latest
+    env:
+      OPERATION: ${{ inputs.operation }}
+      PUBLISH_GATE: ${{ vars.WORKER_PUBLISH_ENABLED }}
+      CONSUMER_OWNER: ${{ vars.WORKER_CONSUMER_OWNER }}
+      STAGE: ${{ inputs.stage }}
+      EXPECTED_ACCOUNT: ${{ vars.WORKER_ACCOUNT_ID }}
+      PRODUCTION_ACCOUNT: ${{ vars.WORKER_PRODUCTION_ACCOUNT_ID }}
+      AWS_REGION: ${{ vars.WORKER_REGION }}
+      SOURCE_ARN: ${{ vars.WORKER_SOURCE_QUEUE_ARN }}
+      DLQ_ARN: ${{ vars.WORKER_DLQ_ARN }}
+      MAIL_BUCKET: ${{ vars.WORKER_MAIL_BUCKET }}
+      MAIL_PREFIX: ${{ vars.WORKER_MAIL_PREFIX }}
+      DB_SECRET: ${{ vars.WORKER_DATABASE_SECRET_ARN }}
+      APP_SECRET: ${{ vars.WORKER_APP_SECRET_ARN }}
+      DECRYPT_KEYS: ${{ vars.WORKER_DECRYPT_KEY_ARNS }}
+      SUBNETS: ${{ vars.WORKER_PRIVATE_SUBNET_IDS }}
+      SECURITY_GROUP: ${{ vars.WORKER_SECURITY_GROUP }}
+      ARTIFACT_BUCKET: ${{ vars.WORKER_ARTIFACT_BUCKET }}
+      CFN_ROLE: ${{ vars.WORKER_CFN_ROLE_ARN }}
+      SAM_CLI_TELEMETRY: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.sha }}', persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with: { name: 'worker-${{ github.sha }}', path: infra/worker/build }
+      - run: (cd infra/worker/build && sha256sum -c worker.sha256)
+      - uses: aws-actions/setup-sam@v2
+      - run: sam validate --lint --region "$AWS_REGION" --template-file infra/worker/template.yaml
+      - name: Verify protected publish gate before assuming a role
+        run: '[[ "$OPERATION" == preview || ( "$OPERATION" == publish && "$PUBLISH_GATE" == true ) ]]'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.operation == 'publish' && vars.WORKER_PUBLISH_ROLE_ARN || vars.WORKER_CHANGESET_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: worker-${{ github.run_id }}
+      - name: Validate queue ownership and run the requested release operation
+        run: bash scripts/worker/prepare-change-set.sh

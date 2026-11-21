@@ -1,0 +1,28 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Separate operator-owned consumption stack. Never part of worker code deployment.
+Parameters:
+  SourceQueueArn: { Type: String, AllowedPattern: 'arn:[^:]+:sqs:[^:]+:[0-9]{12}:[A-Za-z0-9_-]+' }
+  WorkerLiveAliasArn: { Type: String, AllowedPattern: 'arn:[^:]+:lambda:[^:]+:[0-9]{12}:function:[A-Za-z0-9_-]+:live' }
+  EnableConsumption: { Type: String, Default: 'false', AllowedValues: ['false', 'true'] }
+  ConsumerOwner: { Type: String, Default: unverified, AllowedValues: [unverified, lambda-exclusive] }
+Rules:
+  ExclusiveOwnerRequired:
+    RuleCondition: !Equals [!Ref EnableConsumption, 'true']
+    Assertions:
+      - Assert: !Equals [!Ref ConsumerOwner, lambda-exclusive]
+        AssertDescription: Verify PM2 is stopped and drained before assigning the exclusive consumer.
+Conditions:
+  Active: !Equals [!Ref EnableConsumption, 'true']
+Resources:
+  QueueMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Ref SourceQueueArn
+      FunctionName: !Ref WorkerLiveAliasArn
+      Enabled: !If [Active, true, false]
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      ScalingConfig: { MaximumConcurrency: 2 }
+Outputs:
+  MappingId: { Value: !Ref QueueMapping }

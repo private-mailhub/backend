@@ -1,0 +1,9 @@
+From: Synthetic Sender <sender@example.invalid>
+To: fixture-relay@example.invalid
+Subject: Isolated worker fixture only
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Message-ID: <fixture-mail-v1@example.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Synthetic worker fixture. Do not use real addresses or a production queue.

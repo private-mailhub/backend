@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Isolated mail worker. References the existing mail path; never creates ingress or queue consumers on merge.
+Parameters:
+  Stage: { Type: String, AllowedValues: [isolated, production], Default: isolated }
+  WorkerName: { Type: String, AllowedPattern: '[a-z][a-z0-9-]{2,42}' }
+  SourceQueueArn: { Type: String, AllowedPattern: 'arn:[^:]+:sqs:[^:]+:[0-9]{12}:[A-Za-z0-9_-]+' }
+  DeadLetterQueueArn: { Type: String, AllowedPattern: 'arn:[^:]+:sqs:[^:]+:[0-9]{12}:[A-Za-z0-9_-]+' }
+  MailBucket: { Type: String, AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]' }
+  MailPrefix: { Type: String, Default: '', AllowedPattern: '[A-Za-z0-9._/-]*' }
+  DatabaseSecretArn: { Type: String, AllowedPattern: 'arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+' }
+  WorkerSecretArn: { Type: String, AllowedPattern: 'arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+' }
+  # Optional customer-managed key ARNs, never key material. Only service-mediated decrypt is allowed.
+  DecryptKeyArns: { Type: String, Default: '', AllowedPattern: '(|arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[a-zA-Z0-9-]+(,arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[a-zA-Z0-9-]+)*)' }
+  PrivateSubnetIds: { Type: 'List<AWS::EC2::Subnet::Id>' }
+  WorkerSecurityGroup: { Type: 'AWS::EC2::SecurityGroup::Id' }
+Conditions:
+  HasKeys: !Not [!Equals [!Ref DecryptKeyArns, '']]
+Resources:
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub '/aws/lambda/${WorkerName}', RetentionInDays: 14 }
+  HookLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub '/aws/lambda/CodeDeployHook_${WorkerName}', RetentionInDays: 14 }
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: 'sts:AssumeRole' }]
+      Policies:
+        - PolicyName: ExistingMailPathOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - { Effect: Allow, Action: ['logs:CreateLogStream', 'logs:PutLogEvents'], Resource: !GetAtt WorkerLogs.Arn }
+              - { Effect: Allow, Action: ['sqs:ReceiveMessage','sqs:DeleteMessage','sqs:GetQueueAttributes'], Resource: !Ref SourceQueueArn }
+              - { Effect: Allow, Action: ['s3:GetObject','s3:GetObjectVersion'], Resource: !Sub 'arn:${AWS::Partition}:s3:::${MailBucket}/${MailPrefix}*' }
+              - { Effect: Allow, Action: 'secretsmanager:GetSecretValue', Resource: [!Ref DatabaseSecretArn, !Ref WorkerSecretArn] }
+              - !If
+                - HasKeys
+                - Effect: Allow
+                  Action: 'kms:Decrypt'
+                  Resource: !Split [',', !Ref DecryptKeyArns]
+                  Condition: { StringEquals: { 'kms:ViaService': [!Sub 's3.${AWS::Region}.${AWS::URLSuffix}', !Sub 'sqs.${AWS::Region}.${AWS::URLSuffix}', !Sub 'secretsmanager.${AWS::Region}.${AWS::URLSuffix}'] } }
+                - !Ref AWS::NoValue
+              # Lambda needs ENI permissions for an existing private VPC. Function code does not.
+              - { Effect: Allow, Action: ['ec2:CreateNetworkInterface','ec2:DescribeNetworkInterfaces','ec2:DescribeSubnets','ec2:DeleteNetworkInterface','ec2:AssignPrivateIpAddresses','ec2:UnassignPrivateIpAddresses'], Resource: '*' }
+              - Effect: Deny
+                Action: ['ec2:CreateNetworkInterface','ec2:DescribeNetworkInterfaces','ec2:DescribeSubnets','ec2:DeleteNetworkInterface','ec2:AssignPrivateIpAddresses','ec2:UnassignPrivateIpAddresses']
+                Resource: '*'
+                Condition: { ArnEquals: { 'lambda:SourceFunctionArn': !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${WorkerName}' } }
+  Worker:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref WorkerName
+      CodeUri: build/worker.zip
+      Handler: src/worker-lambda/handler.handler
+      Runtime: nodejs24.x
+      Architectures: [x86_64]
+      Role: !GetAtt WorkerRole.Arn
+      MemorySize: 512
+      Timeout: 45
+      ReservedConcurrentExecutions: 2
+      VpcConfig: { SubnetIds: !Ref PrivateSubnetIds, SecurityGroupIds: [!Ref WorkerSecurityGroup] }
+      Environment:
+        Variables:
+          WORKER_STAGE: !Ref Stage
+          SOURCE_QUEUE_ARN: !Ref SourceQueueArn
+          MAIL_BUCKET: !Ref MailBucket
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          WORKER_SECRET_ARN: !Ref WorkerSecretArn
+      AutoPublishAlias: live
+      AutoPublishAliasAllProperties: true
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Alarms: [!Ref FailedRecords, !Ref Errors, !Ref Throttles, !Ref DeadLetters, !Ref OldestMessage]
+        Hooks: { PreTraffic: !Ref Probe, PostTraffic: !Ref Probe }
+  Probe:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'CodeDeployHook_${WorkerName}'
+      Runtime: nodejs24.x
+      Handler: index.handler
+      CodeUri: hook/
+      Timeout: 75
+      MemorySize: 128
+      Role: !GetAtt ProbeRole.Arn
+      Environment:
+        Variables: { CANDIDATE_ARN: !Ref Worker.Version }
+  ProbeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: 'sts:AssumeRole' }]
+      Policies:
+        - PolicyName: VerifyOnlyTheCandidate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - { Effect: Allow, Action: ['logs:CreateLogStream','logs:PutLogEvents'], Resource: !GetAtt HookLogs.Arn }
+              - { Effect: Allow, Action: 'lambda:InvokeFunction', Resource: !Ref Worker.Version }
+              - { Effect: Allow, Action: 'codedeploy:PutLifecycleEventHookExecutionStatus', Resource: !Sub 'arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${ServerlessDeploymentApplication}/*' }
+  FailedRecords:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: Mailhub/Worker
+      MetricName: FailedRecords
+      Dimensions: [{Name: FunctionName, Value: !Ref WorkerName}]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  Errors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Ref WorkerName}]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  Throttles:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions: [{Name: FunctionName, Value: !Ref WorkerName}]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  DeadLetters:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{Name: QueueName, Value: !Select [5, !Split [':', !Ref DeadLetterQueueArn]]}]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  OldestMessage:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions: [{Name: QueueName, Value: !Select [5, !Split [':', !Ref SourceQueueArn]]}]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 600
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+Outputs:
+  WorkerAlias: { Value: !Ref Worker.Alias }
+  CandidateVersion: { Value: !Ref Worker.Version }
