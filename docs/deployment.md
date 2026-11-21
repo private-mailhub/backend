@@ -26,6 +26,18 @@ A merge is not a production deployment.
    `VITE_ENCRYPTION_KEY`; Vite embeds `VITE_*` values in the browser bundle.
 8. Validate mixed client/API versions in an isolated environment and the browser scenarios below.
 
+## GitHub protection handoff
+
+- After these workflow names have been observed on a merged `main` commit, configure the required
+  checks as `backend-quality` and `mail-worker-offline`, bound to the GitHub Actions app. Do not
+  preconfigure unobserved contexts. Keep deployment workflows out of required contexts.
+- The old protected `production` branch retains its legacy `deploy.yml` triggers and shares the
+  `production` environment. Freeze that path without deleting it. Restrict the `production`
+  environment to branch `main` only, with no tags, and leave retirement of the legacy path to a
+  separate operator action.
+- Do not enable deployment, weaken protection rules, or allow self-approval during this handoff.
+  Existing authenticated API readiness and release behavior remain unchanged.
+
 ## Staged encryption-key rotation
 
 The API reads `ENCRYPTION_KEY` first and optionally tries the comma-separated
