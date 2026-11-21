@@ -1,0 +1,25 @@
+name: Mail worker (offline)
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions: { contents: read }
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: 'true'
+      SAM_CLI_TELEMETRY: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24.14.1', cache: npm }
+      - run: npm ci --engine-strict
+      - run: npm run worker:test && node --test scripts/worker/*.test.cjs
+      - run: npm run worker:package
+      - uses: aws-actions/setup-sam@v2
+      - run: sam validate --lint --region us-east-1 --template-file infra/worker/template.yaml
+      - run: sam validate --lint --region us-east-1 --template-file infra/worker/mapping.yaml
