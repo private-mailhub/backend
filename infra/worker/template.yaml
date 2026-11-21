@@ -62,7 +62,8 @@ Resources:
       Role: !GetAtt WorkerRole.Arn
       MemorySize: 512
       Timeout: 45
-      ReservedConcurrentExecutions: 2
+      # Two SQS deliveries plus one direct candidate invocation by the deployment hook.
+      ReservedConcurrentExecutions: 3
       VpcConfig: { SubnetIds: !Ref PrivateSubnetIds, SecurityGroupIds: [!Ref WorkerSecurityGroup] }
       Environment:
         Variables:
