@@ -2,14 +2,13 @@
 
 ## Activation gates
 
-Deployment workflows are manual and gated by the repository-level Actions variable
-`DEPLOYMENT_ENABLED=true`. Leave it unset until the following checks are complete.
-This PR prepares deployment; it does not claim a completed production migration.
+For the current API installation, activation, and rollback, use [API CodeDeploy](api-codedeploy.md) and [the workflow](../.github/workflows/deploy-api.yml). This does not activate or replace the worker.
+A merge is not a production deployment.
 
 1. Read the actual EC2 Node/npm versions, PM2 process names/CWD/script/uptime, Nginx configuration,
    active ports, free memory, and current artifact hashes. Record them outside Git without secrets.
    Node 24.14.1 is the validation runtime; verify compatibility on EC2 before activating deployment.
-   Verify the non-interactive SSH deploy user also resolves this Node/npm version in PATH;
+   Verify the non-interactive API service user also resolves this Node/npm version in PATH;
    an interactive NVM shell alone does not establish that.
 2. Preserve `/var/www/private-mailhub`, its built assets, environment supply, and original worker.
    Confirm DB backup recovery is available. Do not initialize DB, run migrations, flush Redis, or rotate keys.
@@ -22,15 +21,7 @@ This PR prepares deployment; it does not claim a completed production migration.
    Mailgun and CORS settings. CWD-based loading requires each release `.env` symlink. Worker also
    needs all shared validation values including PORT. Keep client-web build settings out of the
    backend environment; the API only needs its server-side settings.
-6. Configure the `backend-api` and `client-web` production environments with required reviewers,
-   main-branch/tag restrictions, SSH host/user/port, known-hosts pin, security group, and AWS role.
-   Scope each repository's OIDC trust to that repository and its `production` environment. Do not
-   duplicate backend runtime secrets into client-web Actions. Keep `DEPLOYMENT_ENABLED` unset until
-   the environment protections and OIDC subject conditions have been reviewed by the IAM owner.
-   Match the temporary ingress port to the SSH port; verify least privilege with the IAM owner.
-   For backend `EC2_KNOWN_HOSTS`, pin `host` for port 22 and `[host]:port` for other ports,
-   using the exact `EC2_HOST` value and the canonical decimal port without leading zeros.
-   Hashed entries for the same endpoint are also supported.
+6. Restrict each GitHub `production` environment to reviewed `main`, with approval rules where available. Use repo-specific OIDC roles, deployment groups, and artifact prefixes. No runner SSH, ingress changes, static AWS keys, or runtime `.env` in Actions.
 7. Supply client-web `VITE_API_URL` only. Do not supply `ENCRYPTION_KEY` or
    `VITE_ENCRYPTION_KEY`; Vite embeds `VITE_*` values in the browser bundle.
 8. Validate mixed client/API versions in an isolated environment and the browser scenarios below.
@@ -52,10 +43,7 @@ Rotate keys in this order, with a backup and a disposable-environment rehearsal 
    the change record and rollback material for the agreed retention window. Never place any key in
    client-web build settings.
 
-Exact workflow secret names and inputs are listed in each `.github/workflows/deploy.yml`.
-The backend workflow **prepares** an immutable release; API/worker activation is a separate manual
-operation because authenticated readiness and the original production setup must be observed.
-No deploy command builds inside a serving directory.
+The first migration to the new FE root or API upstream is an explicit maintenance action. The CI runner must not edit live Nginx configuration. Never build in a serving directory.
 
 ## Initial frontend transition
 
@@ -88,49 +76,9 @@ The template serves ACME challenges on port 80 and redirects every other HTTP re
 It sends HSTS with `includeSubDomains`; install that header only after confirming every production
 subdomain is HTTPS-capable, because the directive also covers hosts outside this application.
 
-## API candidate, switch, then worker
+## Independent API and worker operation
 
-Hold a single interactive shell lock throughout each transition (including rollback on failure):
-
-```bash
-exec 9>/var/lock/mailhub-deploy.lock
-flock -x 9
-```
-
-1. Run the backend prepare workflow for the exact release SHA. Confirm its manifest, `.env` symlink,
-   installed runtime dependencies and `dist/main.js` exist. Record old API/worker CWDs and ports.
-2. Inspect listeners (`ss -ltnp`) and PM2. Choose the idle port from 8080/8081. Export
-   `MAILHUB_RELEASE=/var/www/mailhub-backend/releases/<sha>` and `API_PORT=<idle-port>`.
-   If that candidate name still exists as a stopped entry from an older release, record its
-   config and delete only that stopped entry after confirming it is not the active upstream.
-   Start only that candidate, then verify its PM2 CWD/script match the selected release:
-
-   ```bash
-   pm2 start "$MAILHUB_RELEASE/deploy/ecosystem.config.cjs" --only "mailhub-server-$API_PORT"
-   ```
-
-3. Check candidate logs and unauthenticated `/api/users/me` (401 expected), then use a managed test
-   account to validate actual login, DB reads, Redis session refresh and credentialed CORS.
-   **A 401 alone does not prove readiness.** Do not print tokens or real account details to logs.
-4. Back up the active upstream file. Write the candidate port to a temporary file in `/etc/nginx/`
-   and atomically replace `mailhub-backend-upstream.conf`. Run `sudo nginx -t`; restore the old
-   file if it fails. Reload only after success. On reload/public checks failure restore the old
-   upstream, test, and reload. Keep the old API available throughout.
-5. Verify public web/API, existing-session refresh and proxy fingerprint compatibility. Wait for
-   existing requests/connections to drain before stopping only the recorded old API process name.
-   During initial cutover this may be `mailhub-server`; later it is `mailhub-server-8080` or `-8081`.
-6. Replace the worker **last**. Verify there is exactly one existing consumer and no unexpected
-   worker on another host. Record its release/config. Stop and delete only `mailhub-worker`, then:
-
-   ```bash
-   pm2 start "$MAILHUB_RELEASE/deploy/ecosystem.config.cjs" --only mailhub-worker
-   ```
-
-   If the new worker fails, stop/delete it and start the recorded previous worker with its original
-   config and environment. Never restart all PM2 applications. Persist PM2 state only after success.
-7. Check SQS backlog, processing errors, mail delivery and reply masking with a controlled message.
-   Release the lock after verification. There is no worker drain or deduplication guarantee:
-   replacement can briefly delay mail and a send-before-delete interruption can cause redelivery.
+API activation must never replace the running worker, change its working directory, or garbage-collect its release. API candidate, authenticated readiness and guarded rollback are maintained in the backend [API runbook](https://github.com/private-mailhub/backend/blob/main/docs/api-codedeploy.md). If that implementation has not merged, keep the PM2 worker pinned and use the last reviewed operating procedure. Lambda cutover is a separate change; do not enable an SQS mapping or change worker count as a side effect of a frontend or API release.
 
 ## Independent rollback
 
@@ -141,8 +89,7 @@ Hold the same server lock and record exact current/previous release identities.
   can restore the original checkout if necessary. API/worker processes remain unchanged.
 - **API:** start/verify the previous API at its recorded port if it was stopped. Restore upstream,
   run `nginx -t`, reload, verify public and session checks, then stop the failed candidate only.
-- **Worker:** stop/delete the failed worker and start the recorded previous release's worker alone.
-  Verify a single consumer and delivery. Do not restart the healthy API.
+- **Worker:** use a separate, drain-aware cutover runbook and the same durable delivery ledger in both consumers. Never start an older non-ledger consumer during a Lambda rollback. An API or FE rollback must not change the consumer.
 
 No DB reverse migration, Redis flush, or key regeneration belongs to separation rollback.
 Keep previous artifacts, refs, and backups until the rollback window has been explicitly closed.
@@ -160,3 +107,11 @@ profile/admin views; stale tabs/assets/new tabs/back navigation; controlled mail
 Frontend-only deployment must preserve API/worker PID and uptime. Backend-only deployment must
 preserve FE current and file hashes. Repeat public, session and mail checks after each rollback.
 Only then unfreeze production automation and mark the operational split complete.
+
+## GitHub API deployment gates
+
+- `CODEDEPLOY_ENABLED=true` is a **repository** variable permitting a manual run on `main`. Leave it unset while provisioning. `CODEDEPLOY_AUTO_ENABLED=true` is an additional opt-in for pushes; leave it unset until a successful release, rollback and public verification. Both are read before the production environment is entered.
+- Set `AWS_REGION`, `AWS_ROLE_ARN`, `DEPLOY_BUCKET`, `CODEDEPLOY_APP`, `CODEDEPLOY_GROUP` as protected production variables from the shared foundation. Restrict that environment to protected `main`. Build jobs have no OIDC token; the publishing job pins CodeDeploy to the S3 VersionId returned from its own upload. No GitHub secrets containing runtime credentials or SSH keys are needed.
+- Record actual prior FE release, API port and PM2 PID/CWD and worker SHA before deployment. The wait step reports CodeDeploy failure; the final runner check fetches the public homepage and its real JS. A failure *after* CodeDeploy success requires triage, not an assumption of automatic rollback. Confirm at the real site after each operation. No automatic DB migration or worker/Lambda activation is included.
+
+For a cross-repository contract change, disable both automatic switches, cancel obsolete queued workflow runs, and serialize the compatible API and frontend revisions under the change record. The common host lock prevents concurrent changes, not an incorrect release order. Resume independent automatic releases only after verifying the new pair.
