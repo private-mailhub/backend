@@ -1,0 +1,8 @@
+version: 0.0
+os: linux
+# No file copy into serving directories. No ApplicationStop from an old revision.
+hooks:
+  ValidateService:
+    - location: deploy/codedeploy/api.sh
+      timeout: 1800
+      runas: root
