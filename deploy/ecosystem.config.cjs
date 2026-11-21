@@ -46,6 +46,9 @@ module.exports = {
     },
     {
       name: 'mailhub-worker',
+      // Allow the active SQS long poll plus the current batch to settle on SIGINT/SIGTERM.
+      // This bound does not replace positive drain confirmation during migration.
+      kill_timeout: 180_000,
       cwd: release,
       script: './dist/main.js',
       instances: 1,

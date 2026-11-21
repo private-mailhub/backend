@@ -19,7 +19,8 @@ async function bootstrap() {
 
     console.log(`🚀 Web Server is running on: http://localhost:${port}/api`);
   } else {
-    // Worker mode (polling only)
+    // SIGINT from PM2 and SIGTERM both drain the long poll and any active deliveries.
+    app.enableShutdownHooks(['SIGINT', 'SIGTERM']);
     await app.init();
     console.log(`⚙️  Worker started - SQS polling enabled`);
   }
